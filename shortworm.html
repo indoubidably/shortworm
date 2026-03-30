@@ -1835,7 +1835,7 @@ function makeShip() {
 
 function initShips() {
   alienShips = [];
-  const count = currentLevel >= 3 ? 3 : 2;
+  const count = 2;
   for (let i = 0; i < count; i++) {
     const s = makeShip();
     // Stagger initial idle timers so ships don't all attack at once
@@ -2261,10 +2261,9 @@ function initLevelThreats(n) {
   alienShips = [];
   if (n === 1) feederIntroShown = false;
   if (n === 1) initRobins();
-  if (n >= 2)  { initCompetitors(); initShips(); }
+  if (n >= 2)  initCompetitors();
+  if (n === 2) initShips();    // Alien ships: Level 2 (THE BELT) only
   if (n === 5) initRobins();  // The Void: robins return alongside competitors
-  // TEMP: force ships in Level 1 for visual confirmation — remove after testing
-  if (n === 1) { initShips(); }
 }
 
 function repositionWormAtCenter() {
