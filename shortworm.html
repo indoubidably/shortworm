@@ -1807,6 +1807,198 @@ function drawPoisonPixels() {
   }
 }
 
+// ─── ALIEN SHIPS ─────────────────────────────────────────────────────────────
+const SHIP_HULL_W    = 58;
+const SHIP_HULL_H    = 22;
+const SHIP_TELEGRAPH = 90;    // frames in telegraph phase
+const SHIP_CLAW_SPD  = 4;     // px/frame claw extension
+const SHIP_CLAW_R    = 9;     // claw tip collision radius
+const SHIP_IDLE_MIN  = 160;
+const SHIP_IDLE_MAX  = 340;
+
+let alienShips = [];
+
+function makeShip() {
+  return {
+    x: rand(SHIP_HULL_W, W - SHIP_HULL_W),
+    y: rand(60, 120),
+    vx: (Math.random() < 0.5 ? 1 : -1) * rand(0.5, 1.2),
+    phase: 'idle',
+    phaseT: 0,
+    idleDur: Math.floor(rand(SHIP_IDLE_MIN, SHIP_IDLE_MAX)),
+    clawExt: 0,
+    grabbed: false,
+    targetX: W / 2,
+    targetY: H / 2,
+  };
+}
+
+function initShips() {
+  alienShips = [];
+  const count = currentLevel >= 3 ? 3 : 2;
+  for (let i = 0; i < count; i++) {
+    const s = makeShip();
+    // Stagger initial idle timers so ships don't all attack at once
+    s.phaseT = Math.floor(rand(0, s.idleDur * 0.7));
+    alienShips.push(s);
+    console.log('SHIP SPAWNED', i, s.x, s.y);
+  }
+}
+
+function updateShips() {
+  if (!gameStarted || levelPaused) return;
+  for (const s of alienShips) {
+    s.phaseT++;
+
+    if (s.phase === 'idle') {
+      s.x += s.vx;
+      if (s.x < SHIP_HULL_W / 2)         { s.x = SHIP_HULL_W / 2;     s.vx *= -1; }
+      if (s.x > W - SHIP_HULL_W / 2)     { s.x = W - SHIP_HULL_W / 2; s.vx *= -1; }
+      if (s.phaseT >= s.idleDur && wSegs.length > 1) {
+        const si = Math.floor(rand(1, Math.min(10, wSegs.length - 1)));
+        s.targetX = wrapX(wSegs[si].x);
+        s.targetY = wrapY(wSegs[si].y);
+        s.phase   = 'telegraph';
+        s.phaseT  = 0;
+        s.grabbed = false;
+      }
+    } else if (s.phase === 'telegraph') {
+      const dx = s.targetX - s.x;
+      s.x += Math.sign(dx) * Math.min(Math.abs(dx), 0.8);
+      if (s.phaseT >= SHIP_TELEGRAPH) {
+        s.phase  = 'drop';
+        s.phaseT = 0;
+        s.clawExt = 0;
+      }
+    } else if (s.phase === 'drop') {
+      s.clawExt += SHIP_CLAW_SPD;
+      const maxExt = H - s.y - SHIP_HULL_H / 2;
+      if (s.clawExt > maxExt) s.clawExt = maxExt;
+
+      if (!s.grabbed && wSegs.length > 1) {
+        const clawTipY = s.y + SHIP_HULL_H / 2 + s.clawExt;
+        for (let si = 1; si < wSegs.length; si++) {
+          const sx2 = wrapX(wSegs[si].x), sy2 = wrapY(wSegs[si].y);
+          if (torusDist(s.x, clawTipY, sx2, sy2) < SEG_RADIUS + SHIP_CLAW_R) {
+            wormSnapAt(si, null);
+            sfx.clawGrab();
+            s.grabbed = true;
+            s.phase   = 'retract';
+            s.phaseT  = 0;
+            break;
+          }
+        }
+      }
+      if (!s.grabbed && (s.clawExt >= maxExt - 2 || s.phaseT > 120)) {
+        s.phase  = 'retract';
+        s.phaseT = 0;
+      }
+    } else if (s.phase === 'retract') {
+      s.clawExt -= SHIP_CLAW_SPD * 1.5;
+      if (s.clawExt <= 0) {
+        s.clawExt = 0;
+        s.phase   = 'idle';
+        s.phaseT  = 0;
+        s.idleDur = Math.floor(rand(SHIP_IDLE_MIN, SHIP_IDLE_MAX));
+        s.grabbed = false;
+      }
+    }
+  }
+}
+
+function drawShips() {
+  if (!gameStarted) return;
+  for (const s of alienShips) {
+    const hw = SHIP_HULL_W / 2, hh = SHIP_HULL_H / 2;
+    ctx.save();
+
+    // Telegraph: pulsing cyan dotted line from hull belly to worm target
+    if (s.phase === 'telegraph') {
+      ctx.save();
+      ctx.globalAlpha = 0.35 + 0.35 * Math.sin(s.phaseT * 0.25);
+      ctx.strokeStyle = '#00ffff';
+      ctx.lineWidth   = 1.5;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y + hh);
+      ctx.lineTo(s.targetX, s.targetY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // White pulse ring at ship belly
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth   = 1.5;
+      const pulse = 3 + 3 * Math.sin(s.phaseT * 0.35);
+      ctx.beginPath(); ctx.arc(s.x, s.y + hh, pulse, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+
+    // Cable + V-pincer claw during drop / retract
+    if ((s.phase === 'drop' || s.phase === 'retract') && s.clawExt > 0) {
+      const tipY = s.y + hh + s.clawExt;
+      ctx.strokeStyle = '#88ffaa';
+      ctx.lineWidth   = 2;
+      ctx.shadowColor = '#00ff88';
+      ctx.shadowBlur  = 4;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y + hh);
+      ctx.lineTo(s.x, tipY);
+      ctx.stroke();
+      ctx.shadowBlur  = 0;
+
+      const cr = SHIP_CLAW_R + 3;
+      ctx.strokeStyle = '#22aa66';
+      ctx.lineWidth   = 3;
+      ctx.lineCap     = 'round';
+      ctx.shadowColor = '#00ff88';
+      ctx.shadowBlur  = 8;
+      ctx.beginPath();
+      ctx.moveTo(s.x - cr, tipY - cr * 0.6);
+      ctx.lineTo(s.x,      tipY + 2);
+      ctx.lineTo(s.x + cr, tipY - cr * 0.6);
+      ctx.stroke();
+      ctx.shadowBlur  = 0;
+    }
+
+    // Hull body
+    ctx.fillStyle   = '#22aa66';
+    ctx.shadowColor = '#00ff88';
+    ctx.shadowBlur  = 12;
+    roundRectPath(s.x - hw, s.y - hh, SHIP_HULL_W, SHIP_HULL_H, 6);
+    ctx.fill();
+
+    // Hull belly detail line
+    ctx.strokeStyle = '#00ff88';
+    ctx.lineWidth   = 1;
+    ctx.shadowBlur  = 4;
+    ctx.beginPath();
+    ctx.moveTo(s.x - hw + 8, s.y + hh - 5);
+    ctx.lineTo(s.x + hw - 8, s.y + hh - 5);
+    ctx.stroke();
+
+    // Dome (transparent bubble on top)
+    ctx.shadowBlur  = 0;
+    ctx.beginPath();
+    ctx.ellipse(s.x, s.y - hh + 4, hw * 0.48, hh * 0.9, 0, Math.PI, 0);
+    ctx.fillStyle   = 'rgba(180,255,180,0.22)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,255,120,0.55)';
+    ctx.lineWidth   = 1.5;
+    ctx.stroke();
+
+    // Running lights
+    const blink = Math.sin(s.phaseT * 0.12 + s.x * 0.01) > 0;
+    ctx.fillStyle   = blink ? '#ff4444' : '#661111';
+    ctx.shadowColor = '#ff4444';
+    ctx.shadowBlur  = blink ? 6 : 0;
+    ctx.beginPath(); ctx.arc(s.x - hw + 8, s.y, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle   = blink ? '#44ff44' : '#116611';
+    ctx.shadowColor = '#44ff44';
+    ctx.beginPath(); ctx.arc(s.x + hw - 8, s.y, 3, 0, Math.PI * 2); ctx.fill();
+
+    ctx.restore();
+  }
+}
+
 // ─── LEVEL SYSTEM ────────────────────────────────────────────────────────────
 const LEVEL_DEFS = [
   { n: 1, name: 'DEEP SPACE',   threshold: 500      },
@@ -2066,10 +2258,13 @@ function initLevelThreats(n) {
   // Feeder resets per level; intro toast only resets for full new game (n===1)
   feeder = null; feederSpawnTimer = 0; seedParticles = [];
   feederArrow = null; feederFirstDone = false; feederPos = null;
+  alienShips = [];
   if (n === 1) feederIntroShown = false;
   if (n === 1) initRobins();
-  if (n >= 2)  initCompetitors();
+  if (n >= 2)  { initCompetitors(); initShips(); }
   if (n === 5) initRobins();  // The Void: robins return alongside competitors
+  // TEMP: force ships in Level 1 for visual confirmation — remove after testing
+  if (n === 1) { initShips(); }
 }
 
 function repositionWormAtCenter() {
@@ -2087,6 +2282,7 @@ function doLevelTransition() {
   competitors = []; compRespawnTimers = [];
   blackHole = null; bhPulling = false; bhSegsEaten = 0;
   bhPullSpd = SPEED_BASE; bhSpawnCounter = 0; redWorms = [];
+  alienShips = [];
   currentLevel = next;
   initLevelBackground(currentLevel);
   initPixels();
@@ -3075,6 +3271,7 @@ function frame() {
     updatePoisonPixels();
     // Level-gated threats
     if (currentLevel === 1 || currentLevel === 5) { updateRobins(); updateFeeder(); }
+    if (alienShips.length > 0) updateShips();
     if (currentLevel >= 2) updateCompetitors();
     if (currentLevel >= 3) { updateBlackHole(); updateRedWorms(); }
   }
@@ -3087,6 +3284,7 @@ function frame() {
     drawPoisonPixels();
     drawWorm();
     if (currentLevel === 1 || currentLevel === 5) { drawFeeder(); drawRobins(); drawFeederArrow(); }
+    if (alienShips.length > 0) drawShips();
     if (currentLevel >= 2) drawCompetitors();
     if (currentLevel >= 3) drawRedWorms();
     drawSnapEffects();  // always on top
