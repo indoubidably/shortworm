@@ -1264,9 +1264,11 @@ function makeRobin(fromEdge = false) {
 function robinNewHop(r) {
   r.ax = r.x;  r.ay = r.y;
   let dest;
-  // Priority 1: nearest poison pixel within 350px
+  // Priority 1: nearest PHASE 1 (safe) poison pixel within 350px
+  // Robins avoid Phase 2 pixels — they know better
   let nearPP = null, nearPPDist = 350;
   for (const pp of poisonPixels) {
+    if (pp.age >= POISON_PHASE1) continue;   // skip dangerous phase 2 pixels
     const d = torusDist(r.x, r.y, wrapX(pp.x), wrapY(pp.y));
     if (d < nearPPDist) { nearPPDist = d; nearPP = pp; }
   }
@@ -1320,9 +1322,11 @@ function updateRobins() {
       robinNewHop(r);
     }
 
-    // Robin eats a poison pixel → happy bounce
+    // Robin eats a Phase 1 poison pixel → happy bounce
+    // Phase 2 pixels are avoided (too dangerous)
     for (let pi = poisonPixels.length - 1; pi >= 0; pi--) {
       const pp = poisonPixels[pi];
+      if (pp.age >= POISON_PHASE1) continue;  // won't touch phase 2
       if (torusDist(r.x, r.y, wrapX(pp.x), wrapY(pp.y)) < POISON_EAT_R) {
         poisonPixels.splice(pi, 1);
         r.bounceT = 12;
@@ -1558,14 +1562,16 @@ function drawFeederArrow() {
 }
 
 // ─── SNAP EFFECTS & POISON PIXELS ────────────────────────────────────────────
-const POISON_CAP   = 8;
-const POISON_LIFE  = 320;
-const POISON_FADE  = 40;
-const POISON_EAT_R = 14;   // robin/competitor eat radius
-const POISON_HIT_R = 11;   // player head collision radius (Mega pixel size)
+const POISON_CAP       = 8;
+const POISON_PHASE1    = 140;  // age at which warning → danger
+const POISON_PHASE2    = 280;  // age at which explosion fires
+const POISON_EAT_R     = 14;   // robin/competitor eat radius (phase 1 only)
+const POISON_HIT_R     = 11;   // player collision radius
+const POISON_EXPLODE_R = 55;   // proximity blast radius
 
-let poisonPixels  = [];    // { x, y, vx, vy, life, pulse }
-let snapEffects   = [];    // { x, y, t, zoneColor, sparks, arcs, tailSegs }
+let poisonPixels      = [];    // { x, y, vx, vy, age, pulse }
+let poisonExplosions  = [];    // { x, y, t, particles, flashT }
+let snapEffects       = [];    // { x, y, t, zoneColor, sparks, arcs, tailSegs }
 let camShakeFrames = 0;
 
 /* ── snap trigger ── */
@@ -1599,8 +1605,9 @@ function triggerSnapEffect(bx, by, zoneColor, detachedSegs) {
   snapEffects.push({ x: bx, y: by, t: 0, zoneColor, sparks, arcs, tailSegs });
 }
 
-/* ── worm break function (called by robin collision) ── */
-function wormSnapAt(segIndex, hitRobin) {
+/* ── worm break function (called by robin/claw/explosion collision) ──
+   noNewPoison=true: don't spawn poison pixels (prevents chain reactions) */
+function wormSnapAt(segIndex, hitRobin, noNewPoison = false) {
   if (wSegs.length === 0) return;
   const n = wSegs.length;
   // Keep at least 1 segment (the head)
@@ -1624,20 +1631,19 @@ function wormSnapAt(segIndex, hitRobin) {
   // Detach tail from segIndex onward
   const detached = wSegs.splice(keepTo);
 
-  // Spawn poison pixels from detached segments (capped at POISON_CAP)
-  for (const seg of detached) {
-    poisonPixels.push({
-      x: wrapX(seg.x), y: wrapY(seg.y),
-      vx: (Math.random() - 0.5) * rand(0.8, 1.6),
-      vy: (Math.random() - 0.5) * rand(0.8, 1.6),
-      life: POISON_LIFE,
-      pulse: Math.random() * Math.PI * 2,
-    });
-  }
-  // If over cap, age-out oldest to fade
-  while (poisonPixels.length > POISON_CAP) {
-    poisonPixels[0].life = Math.min(poisonPixels[0].life, POISON_FADE);
-    poisonPixels.shift();
+  // Spawn poison pixels unless suppressed (chain-reaction prevention)
+  if (!noNewPoison) {
+    for (const seg of detached) {
+      poisonPixels.push({
+        x: wrapX(seg.x), y: wrapY(seg.y),
+        vx: (Math.random() - 0.5) * rand(0.8, 1.6),
+        vy: (Math.random() - 0.5) * rand(0.8, 1.6),
+        age: 0,
+        pulse: Math.random() * Math.PI * 2,
+      });
+    }
+    // Discard oldest if over cap (no forced explosion to avoid cascades)
+    while (poisonPixels.length > POISON_CAP) poisonPixels.shift();
   }
 
   triggerSnapEffect(bx, by, zoneColor, detached);
@@ -1741,6 +1747,40 @@ function drawSnapEffects() {
   }
 }
 
+/* ── explode a single poison pixel ── */
+function _explodePoison(pp) {
+  const ex = wrapX(pp.x), ey = wrapY(pp.y);
+  camShakeFrames = Math.max(camShakeFrames, 8);
+  sfx.poisonExplode();
+
+  const particles = [];
+  for (let i = 0; i < 12; i++) {
+    const angle = (i / 12) * Math.PI * 2 + rand(-0.3, 0.3);
+    const spd   = rand(3, 7);
+    particles.push({
+      x: ex, y: ey,
+      vx: Math.cos(angle) * spd,
+      vy: Math.sin(angle) * spd,
+      life: 30, col: i % 2 === 0 ? '#ff2200' : '#f5e642',
+    });
+  }
+  poisonExplosions.push({ x: ex, y: ey, t: 0, particles });
+
+  // Proximity damage: find closest worm segment within POISON_EXPLODE_R
+  if (deathState === null && wInvincible === 0 && wSegs.length > 1) {
+    let nearSi = -1, nearDist = POISON_EXPLODE_R;
+    for (let si = 0; si < wSegs.length; si++) {
+      const d = torusDist(ex, ey, wrapX(wSegs[si].x), wrapY(wSegs[si].y));
+      if (d < nearDist) { nearDist = d; nearSi = si; }
+    }
+    if (nearSi >= 0) {
+      wormSnapAt(nearSi, null, true);   // noNewPoison=true → no chain reaction
+      wInvincible = Math.max(wInvincible, 100);
+      showToast('EXPLOSION!', 1800, '#ff6600');
+    }
+  }
+}
+
 /* ── update poison pixels ── */
 function updatePoisonPixels() {
   if (!gameStarted || levelPaused) return;
@@ -1749,14 +1789,18 @@ function updatePoisonPixels() {
     pp.x    += pp.vx;
     pp.y    += pp.vy;
     pp.pulse += 0.06;
-    pp.life--;
-    if (pp.life <= 0) { poisonPixels.splice(i, 1); }
+    pp.age++;
+    if (pp.age >= POISON_PHASE2) {
+      _explodePoison(pp);
+      poisonPixels.splice(i, 1);
+    }
   }
-  // Player head collision
+  // Phase 2 ONLY: player head collision (phase 1 is safe)
   if (wInvincible === 0 && wSegs.length > 0) {
     const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
     for (let i = poisonPixels.length - 1; i >= 0; i--) {
       const pp = poisonPixels[i];
+      if (pp.age < POISON_PHASE1) continue;  // phase 1: harmless
       if (torusDist(hx, hy, wrapX(pp.x), wrapY(pp.y)) < SEG_RADIUS + POISON_HIT_R) {
         poisonPixels.splice(i, 1);
         const remove = Math.min(4, wSegs.length - 1);
@@ -1774,36 +1818,107 @@ function updatePoisonPixels() {
   }
 }
 
+/* ── update poison explosions ── */
+function updatePoisonExplosions() {
+  for (let i = poisonExplosions.length - 1; i >= 0; i--) {
+    const e = poisonExplosions[i];
+    e.t++;
+    for (let pi = e.particles.length - 1; pi >= 0; pi--) {
+      const p = e.particles[pi];
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.90; p.vy *= 0.90;
+      p.life--;
+      if (p.life <= 0) e.particles.splice(pi, 1);
+    }
+    if (e.t > 35 && e.particles.length === 0) poisonExplosions.splice(i, 1);
+  }
+}
+
 /* ── draw poison pixels ── */
 function drawPoisonPixels() {
   if (!gameStarted || poisonPixels.length === 0) return;
   for (const pp of poisonPixels) {
-    const fade = pp.life < POISON_FADE ? pp.life / POISON_FADE : 1;
-    const sc   = 0.9 + Math.sin(pp.pulse) * 0.10;
-    const r    = POISON_HIT_R * sc;
-    const px   = wrapX(pp.x), py = wrapY(pp.y);
+    const phase2 = pp.age >= POISON_PHASE1;
+    const px = wrapX(pp.x), py = wrapY(pp.y);
+
+    // Phase 2 near-explosion blink (last 30 frames)
+    const nearExp = phase2 && pp.age > POISON_PHASE2 - 30;
+    if (nearExp && Math.floor(pp.age / 4) % 2 === 1) continue; // blink off
+
+    let sc, r;
+    if (phase2) {
+      // Fast pulse: period 18 frames, scale 0.85–1.15
+      sc = 0.85 + 0.30 * (0.5 + 0.5 * Math.sin(pp.age * (Math.PI * 2 / 18)));
+    } else {
+      // Gentle pulse
+      sc = 0.90 + 0.10 * Math.sin(pp.pulse);
+    }
+    r = POISON_HIT_R * sc;
 
     ctx.save();
-    ctx.globalAlpha = fade;
-    // Glow body
-    ctx.fillStyle   = '#aaff00';
-    ctx.shadowColor = '#aaff00';
-    ctx.shadowBlur  = 14;
-    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
-    // Pulsing red outline
-    ctx.strokeStyle = 'rgba(255,0,0,0.7)';
-    ctx.lineWidth   = 1.5;
-    ctx.shadowBlur  = 0;
-    ctx.stroke();
-    // Skull symbol
-    ctx.fillStyle      = '#ff0000';
-    ctx.shadowColor    = '#ff0000';
-    ctx.shadowBlur     = 6;
-    ctx.font           = '700 7px "Space Mono",monospace';
-    ctx.textAlign      = 'center';
-    ctx.textBaseline   = 'bottom';
-    ctx.fillText('☠', px, py - r - 2);
+    if (phase2) {
+      // DANGER: red body, yellow outline
+      ctx.fillStyle   = '#ff2200';
+      ctx.shadowColor = '#ff2200';
+      ctx.shadowBlur  = 20;
+      ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(245,230,66,0.85)';
+      ctx.lineWidth   = 2;
+      ctx.shadowBlur  = 0;
+      ctx.stroke();
+      ctx.fillStyle   = '#f5e642';
+      ctx.shadowColor = '#f5e642';
+      ctx.shadowBlur  = 6;
+      ctx.font        = '700 7px "Space Mono",monospace';
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('☠', px, py - r - 2);
+    } else {
+      // WARNING: yellow body, red outline
+      ctx.fillStyle   = '#f5e642';
+      ctx.shadowColor = '#f5e642';
+      ctx.shadowBlur  = 12;
+      ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,0,0,0.7)';
+      ctx.lineWidth   = 2;
+      ctx.shadowBlur  = 0;
+      ctx.stroke();
+      ctx.fillStyle   = '#ff0000';
+      ctx.font        = '700 7px "Space Mono",monospace';
+      ctx.textAlign   = 'center';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText('✕', px, py - r - 2);
+    }
     ctx.restore();
+  }
+}
+
+/* ── draw poison explosions ── */
+function drawPoisonExplosions() {
+  for (const e of poisonExplosions) {
+    // White flash ring (first 8 frames)
+    if (e.t < 8) {
+      const fr = (e.t / 8) * 40;
+      const fa = (1 - e.t / 8) * 0.6;
+      ctx.save();
+      ctx.globalAlpha = fa;
+      ctx.strokeStyle = '#ffffff';
+      ctx.shadowColor = '#ffffff';
+      ctx.shadowBlur  = 20;
+      ctx.lineWidth   = 3;
+      ctx.beginPath(); ctx.arc(e.x, e.y, fr, 0, Math.PI * 2); ctx.stroke();
+      ctx.restore();
+    }
+    // Particles
+    for (const p of e.particles) {
+      ctx.save();
+      ctx.globalAlpha = p.life / 30;
+      ctx.fillStyle   = p.col;
+      ctx.shadowColor = p.col;
+      ctx.shadowBlur  = 10;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
   }
 }
 
@@ -2407,7 +2522,7 @@ function initLevelThreats(n) {
   competitors = []; compRespawnTimers = [];
   blackHole = null; bhSpawnCounter = 0; bhPulling = false;
   bhSegsEaten = 0; bhPullSpd = SPEED_BASE; redWorms = [];
-  poisonPixels = []; snapEffects = []; camShakeFrames = 0;
+  poisonPixels = []; poisonExplosions = []; snapEffects = []; camShakeFrames = 0;
   // Feeder resets per level; intro toast only resets for full new game (n===1)
   feeder = null; feederSpawnTimer = 0; seedParticles = [];
   feederArrow = null; feederFirstDone = false; feederPos = null;
@@ -2434,7 +2549,7 @@ function doLevelTransition() {
   competitors = []; compRespawnTimers = [];
   blackHole = null; bhPulling = false; bhSegsEaten = 0;
   bhPullSpd = SPEED_BASE; bhSpawnCounter = 0; redWorms = [];
-  alienShips = [];
+  alienShips = []; poisonExplosions = [];
   currentLevel = next;
   initLevelBackground(currentLevel);
   initPixels();
@@ -2525,9 +2640,10 @@ function updateCompetitors() {
   for (let ci = competitors.length - 1; ci >= 0; ci--) {
     const c = competitors[ci];
 
-    // Steer: prefer poison pixels (within 320px) over regular pixels
+    // Steer: prefer Phase 1 poison pixels (within 320px); avoid Phase 2
     let nearDist = Infinity, targetAngle = c.angle;
     for (const pp of poisonPixels) {
+      if (pp.age >= POISON_PHASE1) continue;   // green worms avoid Phase 2 pixels
       const { dx, dy } = torusDelta(c.x, c.y, pp.x, pp.y);
       const d = Math.hypot(dx, dy);
       if (d < nearDist && d < 320) { nearDist = d; targetAngle = Math.atan2(dy, dx); }
@@ -2553,10 +2669,11 @@ function updateCompetitors() {
     const cap = Math.ceil(c.length / spd) + 6;
     if (c.trail.length > cap) c.trail.length = cap;
 
-    // Eat pixels (poison pixels first, then regular)
+    // Eat pixels (Phase 1 poison pixels first, then regular)
     const cx = wrapX(c.x), cy = wrapY(c.y);
     let atePoison = false;
     for (let pi = poisonPixels.length - 1; pi >= 0; pi--) {
+      if (poisonPixels[pi].age >= POISON_PHASE1) continue;  // won't eat Phase 2
       if (torusDist(cx, cy, wrapX(poisonPixels[pi].x), wrapY(poisonPixels[pi].y)) < COMP_EAT_R + POISON_HIT_R) {
         poisonPixels.splice(pi, 1);
         atePoison = true; break;
@@ -3755,6 +3872,10 @@ const sfx = {
     sfxNoise({ duration: 0.04, gain: 0.28, filterFreq: 4800, filterFreqEnd: 600, attack: 0.001 });
     sfxTone({ type: 'sawtooth', freq: 300, freqEnd: 80, duration: 0.18, gain: 0.32, startTime: t0 + 0.008 });
   },
+  poisonExplode() {
+    // Sharp crack: white-noise burst 80ms, punchy
+    sfxNoise({ duration: 0.08, gain: 0.38, filterFreq: 7000, filterFreqEnd: 180, attack: 0.001 });
+  },
 };
 
 // ─── SPEED INDICATOR ─────────────────────────────────────────────────────────
@@ -3810,6 +3931,7 @@ function frame() {
     updatePixels();
     updateSnapEffects();
     updatePoisonPixels();
+    updatePoisonExplosions();
     // Level-gated threats — re-check deathState before each group since any
     // of them can call triggerDeath() which clears wSegs; accessing wSegs[0]
     // after that crashes and halts the animation loop.
@@ -3827,6 +3949,7 @@ function frame() {
     if (currentLevel >= 3) drawBlackHole();
     if (currentLevel === 1 || currentLevel === 5) drawSeedParticles();
     drawPoisonPixels();
+    drawPoisonExplosions();
     drawWorm();
     if (currentLevel === 1 || currentLevel === 5) { drawFeeder(); drawRobins(); drawFeederArrow(); }
     if (alienShips.length > 0) drawShips();
