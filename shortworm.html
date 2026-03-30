@@ -3804,22 +3804,22 @@ function frame() {
     ctx.translate((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8);
   }
 
-  const dying = deathState !== null;
-
-  if (gameStarted && !levelPaused && !dying) {
+  if (gameStarted && !levelPaused && deathState === null) {
     updateWorm();
     updateWormhole();
     updatePixels();
     updateSnapEffects();
     updatePoisonPixels();
-    // Level-gated threats
-    if (currentLevel === 1 || currentLevel === 5) { updateRobins(); updateFeeder(); }
-    if (alienShips.length > 0) updateShips();
-    if (currentLevel >= 2) updateCompetitors();
-    if (currentLevel >= 3) { updateBlackHole(); updateRedWorms(); }
+    // Level-gated threats — re-check deathState before each group since any
+    // of them can call triggerDeath() which clears wSegs; accessing wSegs[0]
+    // after that crashes and halts the animation loop.
+    if (deathState === null && (currentLevel === 1 || currentLevel === 5)) { updateRobins(); updateFeeder(); }
+    if (deathState === null && alienShips.length > 0) updateShips();
+    if (deathState === null && currentLevel >= 2) updateCompetitors();
+    if (deathState === null && currentLevel >= 3) { updateBlackHole(); updateRedWorms(); }
   }
 
-  if (dying) updateDeath();
+  if (deathState !== null) updateDeath();
 
   if (gameStarted) {
     drawPixels();
@@ -3835,7 +3835,7 @@ function frame() {
     drawSnapEffects();  // always on top
   }
 
-  if (dying) drawDeath();
+  if (deathState !== null) drawDeath();
 
   if (shaking) ctx.restore();  // end shake region before full-screen overlays
 
