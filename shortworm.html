@@ -1810,54 +1810,68 @@ function drawPoisonPixels() {
 // ─── ALIEN SHIPS ─────────────────────────────────────────────────────────────
 const SHIP_HULL_W    = 58;
 const SHIP_HULL_H    = 22;
-const SHIP_TELEGRAPH = 90;    // frames in telegraph phase
-const SHIP_CLAW_SPD  = 4;     // px/frame claw extension
-const SHIP_CLAW_R    = 9;     // claw tip collision radius
+const SHIP_DOME_R    = 15;    // dome bubble radius (taller than hull half-height)
+const SHIP_TELEGRAPH = 90;
+const SHIP_CLAW_SPD  = 3.5;
+const SHIP_CLAW_R    = 10;
 const SHIP_IDLE_MIN  = 160;
 const SHIP_IDLE_MAX  = 340;
 
 let alienShips = [];
 
-function makeShip() {
+function makeShip(binSide) {
   return {
     x: rand(SHIP_HULL_W, W - SHIP_HULL_W),
-    y: rand(60, 120),
-    vx: (Math.random() < 0.5 ? 1 : -1) * rand(0.5, 1.2),
+    y: 85 + rand(0, 35),
+    vx: (binSide === 0 ? 1 : -1) * rand(0.5, 1.2),
     phase: 'idle',
     phaseT: 0,
     idleDur: Math.floor(rand(SHIP_IDLE_MIN, SHIP_IDLE_MAX)),
     clawExt: 0,
+    clawPhase: Math.random() * Math.PI * 2,
     grabbed: false,
+    binSide,                // 0 = left bin, 1 = right bin
+    homeX: rand(SHIP_HULL_W, W - SHIP_HULL_W),
     targetX: W / 2,
     targetY: H / 2,
+    eyeT: Math.random() * Math.PI * 2,
   };
 }
 
+function shipBinX(s) { return s.binSide === 0 ? 46 : W - 46; }
+
 function initShips() {
   alienShips = [];
-  const count = 2;
-  for (let i = 0; i < count; i++) {
-    const s = makeShip();
-    // Stagger initial idle timers so ships don't all attack at once
-    s.phaseT = Math.floor(rand(0, s.idleDur * 0.7));
+  for (let i = 0; i < 2; i++) {
+    const s = makeShip(i);
+    s.phaseT = Math.floor(rand(0, s.idleDur * (i === 0 ? 0.35 : 0.65)));
     alienShips.push(s);
-    console.log('SHIP SPAWNED', i, s.x, s.y);
   }
+}
+
+/* Returns 0 (closed) → 1 (fully open) based on phase and clawPhase oscillation */
+function clawOpenAmt(s) {
+  if (s.grabbed) return 0;
+  if (s.phase === 'drop' || (s.phase === 'retract' && !s.grabbed))
+    return 0.5 + 0.5 * Math.sin(s.clawPhase);
+  return 0.85;
 }
 
 function updateShips() {
   if (!gameStarted || levelPaused) return;
   for (const s of alienShips) {
     s.phaseT++;
+    s.eyeT += 0.028;
 
     if (s.phase === 'idle') {
       s.x += s.vx;
-      if (s.x < SHIP_HULL_W / 2)         { s.x = SHIP_HULL_W / 2;     s.vx *= -1; }
-      if (s.x > W - SHIP_HULL_W / 2)     { s.x = W - SHIP_HULL_W / 2; s.vx *= -1; }
+      if (s.x < SHIP_HULL_W / 2)     { s.x = SHIP_HULL_W / 2;     s.vx *= -1; }
+      if (s.x > W - SHIP_HULL_W / 2) { s.x = W - SHIP_HULL_W / 2; s.vx *= -1; }
       if (s.phaseT >= s.idleDur && wSegs.length > 1) {
         const si = Math.floor(rand(1, Math.min(10, wSegs.length - 1)));
         s.targetX = wrapX(wSegs[si].x);
         s.targetY = wrapY(wSegs[si].y);
+        s.homeX   = s.x;
         s.phase   = 'telegraph';
         s.phaseT  = 0;
         s.grabbed = false;
@@ -1866,53 +1880,161 @@ function updateShips() {
       const dx = s.targetX - s.x;
       s.x += Math.sign(dx) * Math.min(Math.abs(dx), 0.8);
       if (s.phaseT >= SHIP_TELEGRAPH) {
-        s.phase  = 'drop';
-        s.phaseT = 0;
-        s.clawExt = 0;
+        s.phase     = 'drop';
+        s.phaseT    = 0;
+        s.clawExt   = 0;
+        s.clawPhase = 0;
       }
     } else if (s.phase === 'drop') {
-      s.clawExt += SHIP_CLAW_SPD;
-      const maxExt = H - s.y - SHIP_HULL_H / 2;
+      s.clawPhase += 0.13;   // open/close oscillation
+      s.clawExt   += SHIP_CLAW_SPD;
+      const maxExt = H - s.y - SHIP_HULL_H / 2 - 10;
       if (s.clawExt > maxExt) s.clawExt = maxExt;
 
-      if (!s.grabbed && wSegs.length > 1) {
-        const clawTipY = s.y + SHIP_HULL_H / 2 + s.clawExt;
+      // Only grab when claw is open enough
+      if (!s.grabbed && clawOpenAmt(s) > 0.55 && wSegs.length > 1) {
+        const tipY = s.y + SHIP_HULL_H / 2 + s.clawExt;
         for (let si = 1; si < wSegs.length; si++) {
-          const sx2 = wrapX(wSegs[si].x), sy2 = wrapY(wSegs[si].y);
-          if (torusDist(s.x, clawTipY, sx2, sy2) < SEG_RADIUS + SHIP_CLAW_R) {
+          const wx = wrapX(wSegs[si].x), wy = wrapY(wSegs[si].y);
+          if (torusDist(s.x, tipY, wx, wy) < SEG_RADIUS + SHIP_CLAW_R) {
             wormSnapAt(si, null);
             sfx.clawGrab();
-            s.grabbed = true;
-            s.phase   = 'retract';
-            s.phaseT  = 0;
+            s.grabbed   = true;
+            s.clawPhase = 0;   // snap shut
+            s.phase     = 'retract';
+            s.phaseT    = 0;
             break;
           }
         }
       }
-      if (!s.grabbed && (s.clawExt >= maxExt - 2 || s.phaseT > 120)) {
+      if (!s.grabbed && (s.clawExt >= maxExt - 1 || s.phaseT > 130)) {
         s.phase  = 'retract';
         s.phaseT = 0;
       }
     } else if (s.phase === 'retract') {
+      if (!s.grabbed) s.clawPhase += 0.13;
       s.clawExt -= SHIP_CLAW_SPD * 1.5;
       if (s.clawExt <= 0) {
         s.clawExt = 0;
+        if (s.grabbed) {
+          s.phase  = 'to_bin';
+          s.phaseT = 0;
+        } else {
+          s.phase   = 'idle';
+          s.phaseT  = 0;
+          s.idleDur = Math.floor(rand(SHIP_IDLE_MIN, SHIP_IDLE_MAX));
+        }
+      }
+    } else if (s.phase === 'to_bin') {
+      const bx = shipBinX(s);
+      const dx = bx - s.x;
+      s.x += Math.sign(dx) * Math.min(Math.abs(dx), 2.0);
+      if (Math.abs(dx) < 2.5) {
+        s.x      = bx;
+        s.phase  = 'drop_bin';
+        s.phaseT = 0;
+        s.clawExt = 0;
+      }
+    } else if (s.phase === 'drop_bin') {
+      if (s.phaseT < 18) {
+        s.clawExt = Math.min(s.clawExt + 3, 28);
+      } else {
+        s.clawExt -= 4.5;
+        if (s.clawExt <= 0) {
+          s.clawExt = 0;
+          s.grabbed = false;
+          s.phase   = 'return_home';
+          s.phaseT  = 0;
+        }
+      }
+    } else if (s.phase === 'return_home') {
+      const dx = s.homeX - s.x;
+      s.x += Math.sign(dx) * Math.min(Math.abs(dx), 1.6);
+      if (Math.abs(dx) < 2.0) {
+        s.x       = s.homeX;
+        s.vx      = (Math.random() < 0.5 ? 1 : -1) * rand(0.5, 1.2);
         s.phase   = 'idle';
         s.phaseT  = 0;
         s.idleDur = Math.floor(rand(SHIP_IDLE_MIN, SHIP_IDLE_MAX));
-        s.grabbed = false;
       }
     }
   }
 }
 
+/* Draw the arcade-style opening/closing claw at (cx, tipY) */
+function drawClaw(cx, tipY, openAmt, grabbed) {
+  const armLen = 13;
+  const maxSpread = 0.75;   // radians when fully open
+  const spread = openAmt * maxSpread;
+
+  ctx.lineCap     = 'round';
+  ctx.lineWidth   = 3;
+  ctx.strokeStyle = grabbed ? '#ffdd44' : '#33cc77';
+  ctx.shadowColor = grabbed ? '#ffaa00' : '#00ff88';
+  ctx.shadowBlur  = grabbed ? 12 : 7;
+
+  // Left arm
+  const lx = cx - Math.sin(spread) * armLen;
+  const ly = tipY + Math.cos(spread) * armLen;
+  ctx.beginPath(); ctx.moveTo(cx, tipY); ctx.lineTo(lx, ly); ctx.stroke();
+  // Right arm
+  const rx = cx + Math.sin(spread) * armLen;
+  const ry = tipY + Math.cos(spread) * armLen;
+  ctx.beginPath(); ctx.moveTo(cx, tipY); ctx.lineTo(rx, ry); ctx.stroke();
+
+  // Inward-curling prong tips (arcade claw curl)
+  ctx.lineWidth = 2;
+  const curlAng = spread * 0.55;
+  ctx.beginPath();
+  ctx.moveTo(lx, ly);
+  ctx.lineTo(lx + Math.sin(curlAng) * 7, ly + Math.cos(curlAng) * 7);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(rx, ry);
+  ctx.lineTo(rx - Math.sin(curlAng) * 7, ry + Math.cos(curlAng) * 7);
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+}
+
 function drawShips() {
   if (!gameStarted) return;
+
+  // Draw collection bins (one per ship, at left/right edge at ship's y level)
+  for (const s of alienShips) {
+    const bx = shipBinX(s), by = s.y;
+    const bw = 34, bh = 22;
+    ctx.save();
+    ctx.fillStyle   = '#0d3322';
+    ctx.strokeStyle = '#00cc66';
+    ctx.lineWidth   = 1.5;
+    ctx.shadowColor = '#00ff88';
+    ctx.shadowBlur  = 5;
+    // Trapezoidal bin body (wider at top, narrower at bottom)
+    ctx.beginPath();
+    ctx.moveTo(bx - bw / 2,       by - bh / 2);
+    ctx.lineTo(bx + bw / 2,       by - bh / 2);
+    ctx.lineTo(bx + bw / 2 - 4,   by + bh / 2);
+    ctx.lineTo(bx - bw / 2 + 4,   by + bh / 2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    // Bin rim (top edge highlight)
+    ctx.strokeStyle = '#00ff88';
+    ctx.lineWidth   = 2.5;
+    ctx.shadowBlur  = 8;
+    ctx.beginPath();
+    ctx.moveTo(bx - bw / 2, by - bh / 2);
+    ctx.lineTo(bx + bw / 2, by - bh / 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   for (const s of alienShips) {
     const hw = SHIP_HULL_W / 2, hh = SHIP_HULL_H / 2;
     ctx.save();
 
-    // Telegraph: pulsing cyan dotted line from hull belly to worm target
+    // Telegraph: pulsing cyan dotted line + belly pulse ring
     if (s.phase === 'telegraph') {
       ctx.save();
       ctx.globalAlpha = 0.35 + 0.35 * Math.sin(s.phaseT * 0.25);
@@ -1924,7 +2046,6 @@ function drawShips() {
       ctx.lineTo(s.targetX, s.targetY);
       ctx.stroke();
       ctx.setLineDash([]);
-      // White pulse ring at ship belly
       ctx.strokeStyle = 'rgba(255,255,255,0.55)';
       ctx.lineWidth   = 1.5;
       const pulse = 3 + 3 * Math.sin(s.phaseT * 0.35);
@@ -1932,41 +2053,40 @@ function drawShips() {
       ctx.restore();
     }
 
-    // Cable + V-pincer claw during drop / retract
-    if ((s.phase === 'drop' || s.phase === 'retract') && s.clawExt > 0) {
+    // Cable + claw (drop, retract, to_bin, drop_bin)
+    const showCable = s.clawExt > 0 &&
+      (s.phase === 'drop' || s.phase === 'retract' ||
+       s.phase === 'to_bin' || s.phase === 'drop_bin');
+    if (showCable) {
       const tipY = s.y + hh + s.clawExt;
       ctx.strokeStyle = '#88ffaa';
       ctx.lineWidth   = 2;
       ctx.shadowColor = '#00ff88';
       ctx.shadowBlur  = 4;
-      ctx.beginPath();
-      ctx.moveTo(s.x, s.y + hh);
-      ctx.lineTo(s.x, tipY);
-      ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(s.x, s.y + hh); ctx.lineTo(s.x, tipY); ctx.stroke();
       ctx.shadowBlur  = 0;
 
-      const cr = SHIP_CLAW_R + 3;
-      ctx.strokeStyle = '#22aa66';
-      ctx.lineWidth   = 3;
-      ctx.lineCap     = 'round';
-      ctx.shadowColor = '#00ff88';
-      ctx.shadowBlur  = 8;
-      ctx.beginPath();
-      ctx.moveTo(s.x - cr, tipY - cr * 0.6);
-      ctx.lineTo(s.x,      tipY + 2);
-      ctx.lineTo(s.x + cr, tipY - cr * 0.6);
-      ctx.stroke();
-      ctx.shadowBlur  = 0;
+      drawClaw(s.x, tipY, clawOpenAmt(s), s.grabbed);
+
+      // Grabbed worm chunk dangling at claw tip
+      if (s.grabbed) {
+        ctx.fillStyle   = '#ff6633';
+        ctx.shadowColor = '#ff4411';
+        ctx.shadowBlur  = 9;
+        ctx.beginPath();
+        ctx.arc(s.x, tipY + 6, SEG_RADIUS * 0.75, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
     }
 
-    // Hull body
+    // ── Hull ──
     ctx.fillStyle   = '#22aa66';
     ctx.shadowColor = '#00ff88';
     ctx.shadowBlur  = 12;
     roundRectPath(s.x - hw, s.y - hh, SHIP_HULL_W, SHIP_HULL_H, 6);
     ctx.fill();
-
-    // Hull belly detail line
+    // Belly detail stripe
     ctx.strokeStyle = '#00ff88';
     ctx.lineWidth   = 1;
     ctx.shadowBlur  = 4;
@@ -1974,24 +2094,57 @@ function drawShips() {
     ctx.moveTo(s.x - hw + 8, s.y + hh - 5);
     ctx.lineTo(s.x + hw - 8, s.y + hh - 5);
     ctx.stroke();
+    ctx.shadowBlur = 0;
 
-    // Dome (transparent bubble on top)
-    ctx.shadowBlur  = 0;
+    // ── Dome + alien head ──
+    const domeCY = s.y - hh - SHIP_DOME_R * 0.6;   // bubble center above hull
+
+    // Alien head (drawn before dome glass so it appears inside)
+    const headR = SHIP_DOME_R * 0.60;
+    ctx.fillStyle   = '#44dd44';
+    ctx.shadowColor = '#00bb00';
+    ctx.shadowBlur  = 5;
     ctx.beginPath();
-    ctx.ellipse(s.x, s.y - hh + 4, hw * 0.48, hh * 0.9, 0, Math.PI, 0);
-    ctx.fillStyle   = 'rgba(180,255,180,0.22)';
+    ctx.arc(s.x, domeCY + headR * 0.12, headR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Big dark alien eyes with blink
+    const blinking = Math.sin(s.eyeT * 3.2) > 0.90;
+    const eyeRx = headR * 0.27, eyeRy = blinking ? 1.2 : headR * 0.33;
+    const eox = headR * 0.37, eoy = headR * 0.04;
+    ctx.fillStyle = '#0a0a1a';
+    ctx.beginPath(); ctx.ellipse(s.x - eox, domeCY + eoy, eyeRx, eyeRy, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(s.x + eox, domeCY + eoy, eyeRx, eyeRy, 0, 0, Math.PI * 2); ctx.fill();
+    // Shine dots
+    if (!blinking) {
+      ctx.fillStyle = 'rgba(255,255,255,0.72)';
+      ctx.beginPath(); ctx.arc(s.x - eox + eyeRx * 0.38, domeCY + eoy - eyeRy * 0.32, eyeRx * 0.29, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(s.x + eox + eyeRx * 0.38, domeCY + eoy - eyeRy * 0.32, eyeRx * 0.29, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Dome glass bubble (on top of alien head)
+    ctx.beginPath();
+    ctx.arc(s.x, domeCY, SHIP_DOME_R, 0, Math.PI * 2);
+    ctx.fillStyle   = 'rgba(180,255,180,0.15)';
     ctx.fill();
     ctx.strokeStyle = 'rgba(0,255,120,0.55)';
     ctx.lineWidth   = 1.5;
     ctx.stroke();
+    // Glass highlight arc
+    ctx.strokeStyle = 'rgba(255,255,255,0.32)';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.arc(s.x - SHIP_DOME_R * 0.22, domeCY - SHIP_DOME_R * 0.28, SHIP_DOME_R * 0.44, Math.PI * 1.1, Math.PI * 1.72);
+    ctx.stroke();
 
-    // Running lights
-    const blink = Math.sin(s.phaseT * 0.12 + s.x * 0.01) > 0;
-    ctx.fillStyle   = blink ? '#ff4444' : '#661111';
+    // ── Running lights ──
+    const lb = Math.sin(s.phaseT * 0.12 + s.x * 0.01) > 0;
+    ctx.fillStyle   = lb ? '#ff4444' : '#661111';
     ctx.shadowColor = '#ff4444';
-    ctx.shadowBlur  = blink ? 6 : 0;
+    ctx.shadowBlur  = lb ? 6 : 0;
     ctx.beginPath(); ctx.arc(s.x - hw + 8, s.y, 3, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle   = blink ? '#44ff44' : '#116611';
+    ctx.fillStyle   = lb ? '#44ff44' : '#116611';
     ctx.shadowColor = '#44ff44';
     ctx.beginPath(); ctx.arc(s.x + hw - 8, s.y, 3, 0, Math.PI * 2); ctx.fill();
 
