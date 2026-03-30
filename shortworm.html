@@ -1122,9 +1122,10 @@ function roundRectPath(x, y, w, h, r) {
 }
 
 // ── draw a single robin (facing-right canonical, flip if facingLeft) ──────────
-function drawRobin(x, y, facingLeft) {
+function drawRobin(x, y, facingLeft, sc = 1) {
   ctx.save();
   ctx.translate(x, y);
+  if (sc !== 1) ctx.scale(sc, sc);
   if (facingLeft) ctx.scale(-1, 1);
 
   // — TAIL (behind body, draw first) —
@@ -1256,13 +1257,22 @@ function makeRobin(fromEdge = false) {
     facingLeft: dest.x < start.x,
     distracted: false,
     distractT:  0,
+    bounceT:    0,
   };
 }
 
 function robinNewHop(r) {
   r.ax = r.x;  r.ay = r.y;
   let dest;
-  if (r.distracted && feederPos) {
+  // Priority 1: nearest poison pixel within 350px
+  let nearPP = null, nearPPDist = 350;
+  for (const pp of poisonPixels) {
+    const d = torusDist(r.x, r.y, wrapX(pp.x), wrapY(pp.y));
+    if (d < nearPPDist) { nearPPDist = d; nearPP = pp; }
+  }
+  if (nearPP) {
+    dest = { x: wrapX(nearPP.x) + rand(-18, 18), y: wrapY(nearPP.y) + rand(-18, 18) };
+  } else if (r.distracted && feederPos) {
     dest = { x: feederPos.x + rand(-25, 25), y: feederPos.y + rand(-25, 25) };
   } else {
     dest = randomRobinDest();
@@ -1294,6 +1304,8 @@ function updateRobins() {
   for (const r of robins) {
     // Distraction countdown
     if (r.distracted && --r.distractT <= 0) r.distracted = false;
+    // Bounce countdown
+    if (r.bounceT > 0) r.bounceT--;
 
     // Advance parabolic hop
     r.hopT++;
@@ -1307,25 +1319,29 @@ function updateRobins() {
       r.x = r.bx;  r.y = r.by;
       robinNewHop(r);
     }
+
+    // Robin eats a poison pixel → happy bounce
+    for (let pi = poisonPixels.length - 1; pi >= 0; pi--) {
+      const pp = poisonPixels[pi];
+      if (torusDist(r.x, r.y, wrapX(pp.x), wrapY(pp.y)) < POISON_EAT_R) {
+        poisonPixels.splice(pi, 1);
+        r.bounceT = 12;
+        robinNewHop(r);
+        break;
+      }
+    }
   }
 
-  // Collision with worm — use toroidal distance against wrapped segment positions
+  // Collision with worm segments
   if (wInvincible > 0 || wSegs.length === 0) return;
 
   outer:
   for (const r of robins) {
     if (r.distracted) continue;
-    for (const seg of wSegs) {
-      const sx = wrapX(seg.x), sy = wrapY(seg.y);
+    for (let si = 0; si < wSegs.length; si++) {
+      const sx = wrapX(wSegs[si].x), sy = wrapY(wSegs[si].y);
       if (torusDist(r.x, r.y, sx, sy) < SEG_RADIUS + ROBIN_COLLISION_R) {
-        if (wSegs.length > 4) {
-          wSegs.pop();
-          wInvincible = 85;
-          sfx.robinHit();
-          robinNewHop(r);
-        } else {
-          loseLife();
-        }
+        wormSnapAt(si, r);
         continue outer;
       }
     }
@@ -1334,7 +1350,10 @@ function updateRobins() {
 
 function drawRobins() {
   if (!gameStarted) return;
-  for (const r of robins) drawRobin(r.x, r.y, r.facingLeft);
+  for (const r of robins) {
+    const sc = r.bounceT > 0 ? (1 + 0.3 * Math.sin((1 - r.bounceT / 12) * Math.PI)) : 1;
+    drawRobin(r.x, r.y, r.facingLeft, sc);
+  }
 }
 
 // ─── BIRD FEEDER ─────────────────────────────────────────────────────────────
@@ -1536,6 +1555,256 @@ function drawFeederArrow() {
   ctx.moveTo(16, 0); ctx.lineTo(4, -7); ctx.lineTo(4, 7);
   ctx.closePath(); ctx.fill();
   ctx.restore();
+}
+
+// ─── SNAP EFFECTS & POISON PIXELS ────────────────────────────────────────────
+const POISON_CAP   = 8;
+const POISON_LIFE  = 320;
+const POISON_FADE  = 40;
+const POISON_EAT_R = 14;   // robin/competitor eat radius
+const POISON_HIT_R = 11;   // player head collision radius (Mega pixel size)
+
+let poisonPixels  = [];    // { x, y, vx, vy, life, pulse }
+let snapEffects   = [];    // { x, y, t, zoneColor, sparks, arcs, tailSegs }
+let camShakeFrames = 0;
+
+/* ── snap trigger ── */
+function triggerSnapEffect(bx, by, zoneColor, detachedSegs) {
+  const sparks = [];
+  for (let i = 0; i < 9; i++) {
+    const angle = (i / 9) * Math.PI * 2 + rand(-0.4, 0.4);
+    const spd   = rand(2.5, 6.0);
+    const col   = wormColor(i / 9);
+    sparks.push({ x: bx, y: by, vx: Math.cos(angle) * spd, vy: Math.sin(angle) * spd,
+                  life: Math.ceil(rand(14, 24)), col });
+  }
+  // 2-3 jagged electric arc lines
+  const arcs = [];
+  for (let a = 0; a < 3; a++) {
+    const angle = rand(0, Math.PI * 2);
+    const len   = rand(22, 42);
+    const pts   = [{ x: bx, y: by }];
+    let cx2 = bx, cy2 = by;
+    for (let s = 0; s < 4; s++) {
+      cx2 += Math.cos(angle) * len / 4 + rand(-10, 10);
+      cy2 += Math.sin(angle) * len / 4 + rand(-10, 10);
+      pts.push({ x: cx2, y: cy2 });
+    }
+    arcs.push({ pts });
+  }
+  // Dissolving tail seg positions (cap at 24 for perf)
+  const tailSegs = detachedSegs.slice(0, 24).map(seg => ({
+    x: wrapX(seg.x), y: wrapY(seg.y), alpha: 1.0,
+  }));
+  snapEffects.push({ x: bx, y: by, t: 0, zoneColor, sparks, arcs, tailSegs });
+}
+
+/* ── worm break function (called by robin collision) ── */
+function wormSnapAt(segIndex, hitRobin) {
+  if (wSegs.length === 0) return;
+  const n = wSegs.length;
+  // Keep at least 1 segment (the head)
+  const keepTo = Math.max(1, segIndex);
+  const bSeg   = wSegs[Math.min(keepTo - 1, wSegs.length - 1)];
+  const bx = wrapX(bSeg.x), by = wrapY(bSeg.y);
+
+  // Zone: >15 cyan (+3 bonus), 8–15 yellow, <8 red (death)
+  const zoneColor = n > 15 ? '#00e5ff' : n >= 8 ? '#f5e642' : '#ff2d78';
+
+  if (n < 8) {
+    // Death zone — flash red, lose life, no segment detach
+    triggerSnapEffect(bx, by, '#ff2d78', []);
+    camShakeFrames = 10;
+    sfx.snap();
+    loseLife();
+    if (hitRobin) robinNewHop(hitRobin);
+    return;
+  }
+
+  // Detach tail from segIndex onward
+  const detached = wSegs.splice(keepTo);
+
+  // Spawn poison pixels from detached segments (capped at POISON_CAP)
+  for (const seg of detached) {
+    poisonPixels.push({
+      x: wrapX(seg.x), y: wrapY(seg.y),
+      vx: (Math.random() - 0.5) * rand(0.8, 1.6),
+      vy: (Math.random() - 0.5) * rand(0.8, 1.6),
+      life: POISON_LIFE,
+      pulse: Math.random() * Math.PI * 2,
+    });
+  }
+  // If over cap, age-out oldest to fade
+  while (poisonPixels.length > POISON_CAP) {
+    poisonPixels[0].life = Math.min(poisonPixels[0].life, POISON_FADE);
+    poisonPixels.shift();
+  }
+
+  triggerSnapEffect(bx, by, zoneColor, detached);
+  camShakeFrames = 10;
+  wInvincible    = 85;
+  sfx.snap();
+
+  if (n > 15) { score += 3; updateHUD(); }
+  if (hitRobin) robinNewHop(hitRobin);
+}
+
+/* ── update snap effects ── */
+function updateSnapEffects() {
+  for (let i = snapEffects.length - 1; i >= 0; i--) {
+    const e = snapEffects[i];
+    e.t++;
+    for (const sp of e.sparks) {
+      sp.x += sp.vx; sp.y += sp.vy;
+      sp.vx *= 0.87; sp.vy *= 0.87;
+      sp.life--;
+    }
+    e.sparks = e.sparks.filter(sp => sp.life > 0);
+    for (const ts of e.tailSegs) ts.alpha = Math.max(0, ts.alpha - 0.052);
+    if (e.t > 35 && e.sparks.length === 0) snapEffects.splice(i, 1);
+  }
+}
+
+/* ── draw snap effects ── */
+function drawSnapEffects() {
+  if (!gameStarted) return;
+  for (const e of snapEffects) {
+    // Electric arcs (first 8 frames)
+    if (e.t < 8) {
+      const arcAlpha = (1 - e.t / 8) * 0.92;
+      ctx.save();
+      ctx.globalAlpha = arcAlpha;
+      ctx.strokeStyle = '#ffffff';
+      ctx.shadowColor = '#ffffff';
+      ctx.shadowBlur  = 9;
+      ctx.lineWidth   = 1.8;
+      ctx.lineCap     = 'round';
+      for (const arc of e.arcs) {
+        ctx.beginPath();
+        ctx.moveTo(arc.pts[0].x, arc.pts[0].y);
+        for (let pi = 1; pi < arc.pts.length; pi++) ctx.lineTo(arc.pts[pi].x, arc.pts[pi].y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    // Dissolving tail segments (white flash → zone color → fade)
+    for (const ts of e.tailSegs) {
+      if (ts.alpha <= 0) continue;
+      const col = e.t < 6 ? '#ffffff' : e.zoneColor;
+      ctx.save();
+      ctx.globalAlpha = ts.alpha;
+      ctx.fillStyle   = col;
+      ctx.shadowColor = e.zoneColor;
+      ctx.shadowBlur  = 10;
+      ctx.beginPath();
+      ctx.arc(ts.x, ts.y, SEG_RADIUS, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    // Expanding zone-color ring at break point
+    if (e.t < 22) {
+      ctx.save();
+      ctx.globalAlpha = (1 - e.t / 22) * 0.88;
+      ctx.strokeStyle = e.zoneColor;
+      ctx.shadowColor = e.zoneColor;
+      ctx.shadowBlur  = 14;
+      ctx.lineWidth   = 2.5;
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, SEG_RADIUS + e.t * 2.2, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+    // Sparks
+    for (const sp of e.sparks) {
+      ctx.save();
+      ctx.globalAlpha = sp.life / 24;
+      ctx.fillStyle   = sp.col.css;
+      ctx.shadowColor = sp.col.css;
+      ctx.shadowBlur  = 7;
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    // Floating +3 for cyan zone
+    if (e.zoneColor === '#00e5ff' && e.t < 32) {
+      ctx.save();
+      ctx.globalAlpha = e.t < 22 ? 1 : 1 - (e.t - 22) / 10;
+      ctx.fillStyle   = '#00e5ff';
+      ctx.shadowColor = '#00e5ff';
+      ctx.shadowBlur  = 9;
+      ctx.font        = '700 12px "Space Mono",monospace';
+      ctx.textAlign   = 'center';
+      ctx.fillText('+3', e.x, e.y - 22 - e.t * 0.55);
+      ctx.restore();
+    }
+  }
+}
+
+/* ── update poison pixels ── */
+function updatePoisonPixels() {
+  if (!gameStarted || levelPaused) return;
+  for (let i = poisonPixels.length - 1; i >= 0; i--) {
+    const pp = poisonPixels[i];
+    pp.x    += pp.vx;
+    pp.y    += pp.vy;
+    pp.pulse += 0.06;
+    pp.life--;
+    if (pp.life <= 0) { poisonPixels.splice(i, 1); }
+  }
+  // Player head collision
+  if (wInvincible === 0 && wSegs.length > 0) {
+    const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
+    for (let i = poisonPixels.length - 1; i >= 0; i--) {
+      const pp = poisonPixels[i];
+      if (torusDist(hx, hy, wrapX(pp.x), wrapY(pp.y)) < SEG_RADIUS + POISON_HIT_R) {
+        poisonPixels.splice(i, 1);
+        const remove = Math.min(4, wSegs.length - 1);
+        if (remove > 0) wSegs.splice(wSegs.length - remove, remove);
+        wInvincible = 60;
+        if (wSegs.length > 0) {
+          const tail = wSegs[wSegs.length - 1];
+          triggerSnapEffect(wrapX(tail.x), wrapY(tail.y), '#aaff00', []);
+        }
+        showToast('POISONED!', 1800, '#aaff00');
+        sfx.damage();
+        break;
+      }
+    }
+  }
+}
+
+/* ── draw poison pixels ── */
+function drawPoisonPixels() {
+  if (!gameStarted || poisonPixels.length === 0) return;
+  for (const pp of poisonPixels) {
+    const fade = pp.life < POISON_FADE ? pp.life / POISON_FADE : 1;
+    const sc   = 0.9 + Math.sin(pp.pulse) * 0.10;
+    const r    = POISON_HIT_R * sc;
+    const px   = wrapX(pp.x), py = wrapY(pp.y);
+
+    ctx.save();
+    ctx.globalAlpha = fade;
+    // Glow body
+    ctx.fillStyle   = '#aaff00';
+    ctx.shadowColor = '#aaff00';
+    ctx.shadowBlur  = 14;
+    ctx.beginPath(); ctx.arc(px, py, r, 0, Math.PI * 2); ctx.fill();
+    // Pulsing red outline
+    ctx.strokeStyle = 'rgba(255,0,0,0.7)';
+    ctx.lineWidth   = 1.5;
+    ctx.shadowBlur  = 0;
+    ctx.stroke();
+    // Skull symbol
+    ctx.fillStyle      = '#ff0000';
+    ctx.shadowColor    = '#ff0000';
+    ctx.shadowBlur     = 6;
+    ctx.font           = '700 7px "Space Mono",monospace';
+    ctx.textAlign      = 'center';
+    ctx.textBaseline   = 'bottom';
+    ctx.fillText('☠', px, py - r - 2);
+    ctx.restore();
+  }
 }
 
 // ─── LEVEL SYSTEM ────────────────────────────────────────────────────────────
@@ -1793,6 +2062,7 @@ function initLevelThreats(n) {
   competitors = []; compRespawnTimers = [];
   blackHole = null; bhSpawnCounter = 0; bhPulling = false;
   bhSegsEaten = 0; bhPullSpd = SPEED_BASE; redWorms = [];
+  poisonPixels = []; snapEffects = []; camShakeFrames = 0;
   // Feeder resets per level; intro toast only resets for full new game (n===1)
   feeder = null; feederSpawnTimer = 0; seedParticles = [];
   feederArrow = null; feederFirstDone = false; feederPos = null;
@@ -1916,12 +2186,19 @@ function updateCompetitors() {
   for (let ci = competitors.length - 1; ci >= 0; ci--) {
     const c = competitors[ci];
 
-    // Steer toward nearest pixel (toroidal)
+    // Steer: prefer poison pixels (within 320px) over regular pixels
     let nearDist = Infinity, targetAngle = c.angle;
-    for (const p of pixels) {
-      const { dx, dy } = torusDelta(c.x, c.y, p.x, p.y);
+    for (const pp of poisonPixels) {
+      const { dx, dy } = torusDelta(c.x, c.y, pp.x, pp.y);
       const d = Math.hypot(dx, dy);
-      if (d < nearDist) { nearDist = d; targetAngle = Math.atan2(dy, dx); }
+      if (d < nearDist && d < 320) { nearDist = d; targetAngle = Math.atan2(dy, dx); }
+    }
+    if (nearDist > 320) {
+      for (const p of pixels) {
+        const { dx, dy } = torusDelta(c.x, c.y, p.x, p.y);
+        const d = Math.hypot(dx, dy);
+        if (d < nearDist) { nearDist = d; targetAngle = Math.atan2(dy, dx); }
+      }
     }
     let da = targetAngle - c.angle;
     while (da >  Math.PI) da -= Math.PI * 2;
@@ -1937,15 +2214,21 @@ function updateCompetitors() {
     const cap = Math.ceil(c.length / spd) + 6;
     if (c.trail.length > cap) c.trail.length = cap;
 
-    // Eat pixels
+    // Eat pixels (poison pixels first, then regular)
     const cx = wrapX(c.x), cy = wrapY(c.y);
-    for (let pi = pixels.length - 1; pi >= 0; pi--) {
-      const p = pixels[pi];
-      if (torusDist(cx, cy, p.x, p.y) < COMP_EAT_R + p.type.r) {
-        c.length += 12;
-        pixels.splice(pi, 1);
-        spawnPixel();
-        break;
+    let atePoison = false;
+    for (let pi = poisonPixels.length - 1; pi >= 0; pi--) {
+      if (torusDist(cx, cy, wrapX(poisonPixels[pi].x), wrapY(poisonPixels[pi].y)) < COMP_EAT_R + POISON_HIT_R) {
+        poisonPixels.splice(pi, 1);
+        atePoison = true; break;
+      }
+    }
+    if (!atePoison) {
+      for (let pi = pixels.length - 1; pi >= 0; pi--) {
+        const p = pixels[pi];
+        if (torusDist(cx, cy, p.x, p.y) < COMP_EAT_R + p.type.r) {
+          c.length += 12; pixels.splice(pi, 1); spawnPixel(); break;
+        }
       }
     }
 
@@ -2305,8 +2588,11 @@ function drawRedWorms() {
 const toastEl = document.getElementById('toast');
 let toastTimer = null;
 
-function showToast(msg, duration = 1800) {
-  toastEl.textContent = msg;
+function showToast(msg, duration = 1800, color = null) {
+  toastEl.textContent   = msg;
+  toastEl.style.color   = color || '';
+  toastEl.style.textShadow = color ? `0 0 10px ${color}, 0 0 22px ${color}88` : '';
+  toastEl.style.borderColor = color ? `${color}88` : '';
   toastEl.classList.add('visible');
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
@@ -2726,6 +3012,12 @@ const sfx = {
   tailBite() {
     sfxTone({ type: 'sawtooth', freq: 320, freqEnd: 140, duration: 0.18, gain: 0.26 });
   },
+  snap() {
+    // NES cartridge yank: short noise burst + descending sawtooth zap
+    const ac = getAudioCtx(); const t0 = ac.currentTime;
+    sfxNoise({ duration: 0.04, gain: 0.28, filterFreq: 4800, filterFreqEnd: 600, attack: 0.001 });
+    sfxTone({ type: 'sawtooth', freq: 300, freqEnd: 80, duration: 0.18, gain: 0.32, startTime: t0 + 0.008 });
+  },
 };
 
 // ─── SPEED INDICATOR ─────────────────────────────────────────────────────────
@@ -2764,13 +3056,23 @@ function updateSpeedIndicator() {
 
 // ─── MAIN LOOP ───────────────────────────────────────────────────────────────
 function frame() {
-  // Background (level-dependent, always animates)
+  // Background always draws at full canvas — no shake offset (avoids edge gaps)
   drawBackground();
+
+  // Camera shake: offset everything EXCEPT background and full-screen overlays
+  const shaking = camShakeFrames > 0;
+  if (shaking) {
+    camShakeFrames--;
+    ctx.save();
+    ctx.translate((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8);
+  }
 
   if (gameStarted && !levelPaused) {
     updateWorm();
     updateWormhole();
     updatePixels();
+    updateSnapEffects();
+    updatePoisonPixels();
     // Level-gated threats
     if (currentLevel === 1 || currentLevel === 5) { updateRobins(); updateFeeder(); }
     if (currentLevel >= 2) updateCompetitors();
@@ -2782,11 +3084,15 @@ function frame() {
     drawWormholeSprite();
     if (currentLevel >= 3) drawBlackHole();
     if (currentLevel === 1 || currentLevel === 5) drawSeedParticles();
+    drawPoisonPixels();
     drawWorm();
     if (currentLevel === 1 || currentLevel === 5) { drawFeeder(); drawRobins(); drawFeederArrow(); }
     if (currentLevel >= 2) drawCompetitors();
     if (currentLevel >= 3) drawRedWorms();
+    drawSnapEffects();  // always on top
   }
+
+  if (shaking) ctx.restore();  // end shake region before full-screen overlays
 
   // Screen invert flash (black hole absorption)
   if (bhInvertAlpha > 0) {
