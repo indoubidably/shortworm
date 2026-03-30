@@ -2473,16 +2473,7 @@ function checkLevelThreshold() {
 
 // ─── LOSE LIFE ───────────────────────────────────────────────────────────────
 function loseLife() {
-  lives--; wInvincible = 120; updateHUD();
-  if (lives <= 0) {
-    sfx.gameOver();
-    gameStarted = false; wormhole = null; levelPaused = false;
-    const banner = document.getElementById('level-banner');
-    if (banner) banner.style.display = 'none';
-    menuEl.classList.remove('hidden');
-  } else {
-    sfx.damage();
-  }
+  triggerDeath();
 }
 
 // ─── COMPETITOR WORMS ────────────────────────────────────────────────────────
@@ -2949,6 +2940,352 @@ function showToast(msg, duration = 1800, color = null) {
   }, duration);
 }
 
+// ─── DEATH SEQUENCE ──────────────────────────────────────────────────────────
+// States: null → 'shatter' → 'ghost' → 'fade' → 'game_over'
+let deathState      = null;
+let deathT          = 0;
+let deathParticles  = [];   // exploding worm segments
+let ghostChain      = null; // Array<{x,y}> — 10 segments
+let ghostOpacity    = 0;
+let ghostHeadX      = 0;
+let ghostHeadY      = 0;
+let ghostVY         = 1.8;  // rising speed, accelerates
+let ghostSparkles   = [];   // {x,y,vx,vy,alpha}
+let deathFadeAlpha  = 0;
+let gameOverT       = 0;
+let highScore       = parseInt(localStorage.getItem('sw_hiscore') || '0', 10);
+
+const GHOST_SEGS    = 10;
+const GHOST_SPACING = 20;
+const GHOST_R       = 10;
+
+function triggerDeath() {
+  if (deathState !== null) return;   // already dying
+  sfx.death();
+  camShakeFrames = 18;
+
+  // Snapshot worm segments → particles
+  deathParticles = wSegs.map((seg, i) => {
+    const t     = i / Math.max(wSegs.length - 1, 1);
+    const col   = wormColor(t).css;
+    const angle = rand(0, Math.PI * 2);
+    const spd   = rand(2.2, 5.2);
+    return {
+      x: wrapX(seg.x), y: wrapY(seg.y),
+      vx: Math.cos(angle) * spd,
+      vy: Math.sin(angle) * spd,
+      col, life: 40, maxLife: 50,
+    };
+  });
+
+  // Save head position for ghost
+  ghostHeadX = wSegs.length > 0 ? wrapX(wSegs[0].x) : W / 2;
+  ghostHeadY = wSegs.length > 0 ? wrapY(wSegs[0].y) : H / 2;
+
+  wSegs = [];   // worm disappears (replaced by particles)
+  wormhole = null;
+  deathState  = 'shatter';
+  deathT      = 0;
+  ghostChain  = null;
+  ghostVY     = 1.8;
+  ghostSparkles = [];
+  ghostOpacity  = 0;
+  deathFadeAlpha = 0;
+}
+
+function _spawnGhost() {
+  // Build 10-seg ghost chain hanging below head
+  ghostChain = [];
+  for (let i = 0; i < GHOST_SEGS; i++) {
+    ghostChain.push({ x: ghostHeadX, y: ghostHeadY + i * GHOST_SPACING });
+  }
+  ghostOpacity = 0.9;
+}
+
+function updateDeath() {
+  if (!deathState) return;
+  deathT++;
+
+  if (deathState === 'shatter') {
+    for (let i = deathParticles.length - 1; i >= 0; i--) {
+      const p = deathParticles[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vx *= 0.93; p.vy *= 0.93;
+      p.life--;
+      if (p.life <= 0) deathParticles.splice(i, 1);
+    }
+    if (deathT === 35) {
+      _spawnGhost();
+      deathState = 'ghost';
+      deathT     = 0;
+    }
+
+  } else if (deathState === 'ghost') {
+    // Accelerate rise
+    ghostVY = Math.min(ghostVY + 0.012, 3.0);
+    ghostHeadY -= ghostVY;
+    ghostHeadX += Math.sin(deathT * 0.038) * 0.7;
+
+    // Chain follows head
+    ghostChain[0].x = ghostHeadX;
+    ghostChain[0].y = ghostHeadY;
+    for (let i = 1; i < ghostChain.length; i++) {
+      const prev = ghostChain[i - 1], curr = ghostChain[i];
+      const dx = curr.x - prev.x, dy = curr.y - prev.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > GHOST_SPACING) {
+        const over = dist - GHOST_SPACING;
+        curr.x -= (dx / dist) * over;
+        curr.y -= (dy / dist) * over;
+      }
+    }
+
+    // Fade out over 145 frames
+    ghostOpacity = Math.max(0, 0.9 - deathT / 145 * 0.9);
+
+    // Sparkles off body
+    if (deathT % 8 < 3) {
+      const si  = Math.floor(rand(0, ghostChain.length));
+      const seg = ghostChain[si];
+      ghostSparkles.push({
+        x: seg.x + rand(-6, 6), y: seg.y + rand(-6, 6),
+        vx: rand(-0.4, 0.4), vy: rand(-1.4, -0.5),
+        alpha: 0.9,
+      });
+    }
+    for (let i = ghostSparkles.length - 1; i >= 0; i--) {
+      const sp = ghostSparkles[i];
+      sp.x += sp.vx; sp.y += sp.vy; sp.alpha -= 0.022;
+      if (sp.alpha <= 0) ghostSparkles.splice(i, 1);
+    }
+
+    if (ghostOpacity <= 0 || ghostHeadY < -60) {
+      ghostChain  = null;
+      ghostSparkles = [];
+      deathState  = 'fade';
+      deathT      = 0;
+      deathFadeAlpha = 0;
+    }
+
+  } else if (deathState === 'fade') {
+    deathFadeAlpha = Math.min(1, deathT / 18);
+    if (deathT >= 18) {
+      // Commit the death
+      lives--;
+      if (score > highScore) {
+        highScore = score;
+        localStorage.setItem('sw_hiscore', String(highScore));
+      }
+      updateHUD();
+
+      if (lives > 0) {
+        // Respawn
+        wormhole     = null;
+        wormholeFlashAlpha = 0;
+        const banner = document.getElementById('level-banner');
+        if (banner) banner.style.display = 'none';
+        levelPaused  = false;
+        deathState   = null;
+        deathFadeAlpha = 0;
+        deathParticles = [];
+        const cx = W / 2, cy = H / 2;
+        wSegs = Array.from({ length: START_SEGS }, (_, i) => ({
+          x: cx - i * SEG_SPACING, y: cy,
+        }));
+        wDir = { x: 1, y: 0 }; wTarget = { x: 1, y: 0 };
+        wStopped = false; wBoosting = false; wSlowing = false;
+        wGrow    = 0;
+        wInvincible = 220;
+        showToast('BACK IN ACTION', 2000, '#00e5ff');
+      } else {
+        // Game over
+        sfx.gameOver();
+        deathState = 'game_over';
+        deathT     = 0;
+        gameOverT  = 0;
+      }
+    }
+
+  } else if (deathState === 'game_over') {
+    gameOverT++;
+    deathFadeAlpha = Math.min(0.88, deathFadeAlpha + 0.04);
+  }
+}
+
+function drawDeath() {
+  // Shatter particles
+  for (const p of deathParticles) {
+    const fade = p.life / p.maxLife;
+    const col  = p.life > 25 ? p.col : '#ffffff';
+    ctx.save();
+    ctx.globalAlpha = fade;
+    ctx.fillStyle   = col;
+    ctx.shadowColor = col;
+    ctx.shadowBlur  = 8;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, SEG_RADIUS * 0.85, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Ghost sparkles
+  for (const sp of ghostSparkles) {
+    ctx.save();
+    ctx.globalAlpha = sp.alpha;
+    ctx.fillStyle   = '#ffffff';
+    ctx.shadowColor = '#aaddff';
+    ctx.shadowBlur  = 8;
+    ctx.beginPath(); ctx.arc(sp.x, sp.y, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // Ghost worm
+  if (ghostChain && ghostOpacity > 0) {
+    ctx.save();
+    ctx.globalAlpha = ghostOpacity;
+
+    // Body segments (tail to head so head renders on top)
+    for (let i = ghostChain.length - 1; i >= 0; i--) {
+      const seg = ghostChain[i];
+      const r   = i === 0 ? GHOST_R + 2 : GHOST_R;
+      ctx.fillStyle   = '#aaddff';
+      ctx.shadowColor = 'rgba(180,220,255,0.6)';
+      ctx.shadowBlur  = 20;
+      ctx.beginPath(); ctx.arc(seg.x, seg.y, r, 0, Math.PI * 2); ctx.fill();
+    }
+
+    // Ghost face on head segment
+    const hx = ghostChain[0].x, hy = ghostChain[0].y;
+    const fr  = GHOST_R + 2;
+
+    // Halo
+    ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+    ctx.lineWidth   = 1.2;
+    ctx.shadowBlur  = 0;
+    ctx.beginPath(); ctx.arc(hx, hy - fr - 5, 6, 0, Math.PI * 2); ctx.stroke();
+
+    // Eyes (two white dots)
+    ctx.fillStyle   = '#ffffff';
+    ctx.shadowBlur  = 0;
+    ctx.beginPath(); ctx.arc(hx - 4, hy - 2, 2.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(hx + 4, hy - 2, 2.5, 0, Math.PI * 2); ctx.fill();
+
+    // Surprised O mouth
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath(); ctx.arc(hx, hy + 4, 2.8, 0, Math.PI * 2); ctx.stroke();
+
+    ctx.restore();
+  }
+
+  // Black fade overlay (fade-to-black and game-over background)
+  if (deathFadeAlpha > 0) {
+    ctx.save();
+    ctx.globalAlpha = deathFadeAlpha;
+    ctx.fillStyle   = '#000000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  // Game over screen
+  if (deathState === 'game_over') {
+    _drawGameOver();
+  }
+}
+
+function _drawGameOver() {
+  const cx = W / 2, cy = H / 2;
+
+  // "GAME OVER"
+  ctx.save();
+  ctx.textAlign  = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font       = `700 ${Math.floor(W * 0.11)}px "Space Mono",monospace`;
+  ctx.fillStyle  = PINK;
+  ctx.shadowColor = PINK;
+  ctx.shadowBlur  = 30;
+  ctx.fillText('GAME OVER', cx, cy - 80);
+  ctx.shadowBlur  = 60;
+  ctx.globalAlpha = 0.4;
+  ctx.fillText('GAME OVER', cx, cy - 80);
+  ctx.restore();
+
+  // Final score
+  ctx.save();
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font         = '700 18px "Space Mono",monospace';
+  ctx.fillStyle    = CYAN;
+  ctx.shadowColor  = CYAN;
+  ctx.shadowBlur   = 12;
+  ctx.fillText(`SCORE  ${String(score).padStart(6, '0')}`, cx, cy - 18);
+  ctx.restore();
+
+  // High score
+  const newHi = score >= highScore && score > 0;
+  ctx.save();
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font         = '400 13px "Space Mono",monospace';
+  ctx.fillStyle    = newHi ? YELLOW : MUTED;
+  ctx.shadowColor  = newHi ? YELLOW : 'transparent';
+  ctx.shadowBlur   = newHi ? 10 : 0;
+  ctx.fillText(
+    newHi ? `✦ NEW BEST  ${String(highScore).padStart(6,'0')} ✦`
+           : `BEST   ${String(highScore).padStart(6, '0')}`,
+    cx, cy + 14
+  );
+  ctx.restore();
+
+  // Blinking "— INSERT COIN —"
+  if (Math.floor(gameOverT / 30) % 2 === 0) {
+    ctx.save();
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font         = '700 12px "Space Mono",monospace';
+    ctx.fillStyle    = YELLOW;
+    ctx.shadowColor  = YELLOW;
+    ctx.shadowBlur   = 8;
+    ctx.fillText('— INSERT COIN —', cx, cy + 52);
+    ctx.restore();
+  }
+
+  // Ghost memorial icon (bottom-left corner)
+  _drawGhostIcon(42, H - 42, 0.72);
+}
+
+/* Tiny static ghost icon at (gx,gy) with given opacity */
+function _drawGhostIcon(gx, gy, alpha) {
+  const r = 10, segs = 5, sp = 14;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+
+  // Body chain
+  for (let i = segs - 1; i >= 0; i--) {
+    ctx.fillStyle   = '#aaddff';
+    ctx.shadowColor = 'rgba(180,220,255,0.5)';
+    ctx.shadowBlur  = 12;
+    ctx.beginPath();
+    ctx.arc(gx, gy + i * sp, i === 0 ? r + 2 : r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Halo
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth   = 1;
+  ctx.shadowBlur  = 0;
+  ctx.beginPath(); ctx.arc(gx, gy - r - 5, 6, 0, Math.PI * 2); ctx.stroke();
+
+  // Face
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(gx - 3.5, gy - 2, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(gx + 3.5, gy - 2, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.arc(gx, gy + 3.5, 2.2, 0, Math.PI * 2); ctx.stroke();
+
+  ctx.restore();
+}
+
 // ─── GAME STATE ──────────────────────────────────────────────────────────────
 let score = 0;
 let lives = 3;
@@ -2970,6 +3307,12 @@ document.addEventListener('keydown', e => {
   keysDown.add(e.code);
 
   if (!gameStarted) { startGame(); return; }
+
+  // During death: game-over screen → any key returns to menu
+  if (deathState === 'game_over' && gameOverT > 60) {
+    _endGameOver(); return;
+  }
+  if (deathState !== null) return;  // block all input during death sequence
 
   switch (e.code) {
     case 'ArrowUp':    case 'KeyW': setTarget( 0, -1); break;
@@ -3178,6 +3521,7 @@ document.getElementById('rconf-cancel').addEventListener('click', () => {
 document.getElementById('rconf-ok').addEventListener('click', () => {
   restartConfirmEl.classList.remove('visible');
   // Full reset
+  deathState = null; deathParticles = []; ghostChain = null; ghostSparkles = [];
   score        = 0;
   lives        = 3;
   currentLevel = 1;
@@ -3194,11 +3538,31 @@ document.getElementById('rconf-ok').addEventListener('click', () => {
   showLevelBanner(1);
 });
 
+function _endGameOver() {
+  // Return to menu after game over screen
+  deathState     = null;
+  deathParticles = [];
+  ghostChain     = null;
+  ghostSparkles  = [];
+  deathFadeAlpha = 0;
+  gameStarted    = false;
+  wormhole       = null;
+  levelPaused    = false;
+  const banner   = document.getElementById('level-banner');
+  if (banner) banner.style.display = 'none';
+  menuEl.classList.remove('hidden');
+}
+
 // ─── MENU ────────────────────────────────────────────────────────────────────
 const menuEl = document.getElementById('menu');
 
 function startGame() {
   if (gameStarted) return;
+  deathState     = null;
+  deathParticles = [];
+  ghostChain     = null;
+  ghostSparkles  = [];
+  deathFadeAlpha = 0;
   gameStarted  = true;
   currentLevel = 1;
   wormhole     = null;
@@ -3218,7 +3582,8 @@ function startGame() {
 document.addEventListener('pointerdown', e => {
   // Don't intercept mobile control touches
   if (e.target.closest('#mobile-controls')) return;
-  if (!gameStarted) startGame();
+  if (!gameStarted) { startGame(); return; }
+  if (deathState === 'game_over' && gameOverT > 60) { _endGameOver(); return; }
 });
 
 // ─── SOUND ENGINE ────────────────────────────────────────────────────────────
@@ -3344,6 +3709,30 @@ const sfx = {
     sfxTone({ type: 'sine', freq: 440, duration: 0.14, gain: 0.22, startTime: t0 });
     sfxTone({ type: 'sine', freq: 660, duration: 0.18, gain: 0.26, startTime: t0 + 0.15 });
   },
+  death() {
+    if (!soundEnabled) return;
+    const ac = getAudioCtx(); const t0 = ac.currentTime;
+    // Phase 1: single high clear tone (0ms, 100ms)
+    sfxTone({ type: 'sine', freq: 880, duration: 0.10, gain: 0.45, startTime: t0 });
+    // Phase 2: descending warble with rapid vibrato (80ms, 900ms)
+    const osc2 = ac.createOscillator(), gn2 = ac.createGain();
+    const lfo  = ac.createOscillator(), lfg = ac.createGain();
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(660, t0 + 0.08);
+    osc2.frequency.exponentialRampToValueAtTime(80, t0 + 0.98);
+    lfo.frequency.value = 18;
+    lfg.gain.value = 40;
+    lfo.connect(lfg); lfg.connect(osc2.frequency);
+    gn2.gain.setValueAtTime(0.35, t0 + 0.08);
+    gn2.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.98);
+    osc2.connect(gn2); gn2.connect(ac.destination);
+    lfo.start(t0 + 0.08); osc2.start(t0 + 0.08);
+    lfo.stop(t0 + 0.99);  osc2.stop(t0 + 0.99);
+    // Phase 3: low gurgle (600ms, 400ms)
+    sfxTone({ type: 'sawtooth', freq: 60, duration: 0.40, gain: 0.15, startTime: t0 + 0.60 });
+    // Phase 4: final fading tone (900ms, 600ms)
+    sfxTone({ type: 'sine', freq: 120, duration: 0.60, gain: 0.30, gainEnd: 0, startTime: t0 + 0.90 });
+  },
   gameOver() {
     const ac = getAudioCtx(); const t0 = ac.currentTime;
     sfxTone({ type: 'sawtooth', freq: 392, duration: 0.16, gain: 0.24, startTime: t0 });
@@ -3415,7 +3804,9 @@ function frame() {
     ctx.translate((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 8);
   }
 
-  if (gameStarted && !levelPaused) {
+  const dying = deathState !== null;
+
+  if (gameStarted && !levelPaused && !dying) {
     updateWorm();
     updateWormhole();
     updatePixels();
@@ -3427,6 +3818,8 @@ function frame() {
     if (currentLevel >= 2) updateCompetitors();
     if (currentLevel >= 3) { updateBlackHole(); updateRedWorms(); }
   }
+
+  if (dying) updateDeath();
 
   if (gameStarted) {
     drawPixels();
@@ -3441,6 +3834,8 @@ function frame() {
     if (currentLevel >= 3) drawRedWorms();
     drawSnapEffects();  // always on top
   }
+
+  if (dying) drawDeath();
 
   if (shaking) ctx.restore();  // end shake region before full-screen overlays
 
