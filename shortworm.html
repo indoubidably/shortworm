@@ -474,6 +474,42 @@
   }
   #sound-btn:hover { opacity: 1; transform: scale(1.15); }
 
+  /* CONTROLS HINT */
+  #controls-hint {
+    position: fixed;
+    bottom: 52px;
+    left: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .ctrl-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ctrl-key {
+    font-family: 'Space Mono', monospace;
+    font-size: 7px;
+    font-weight: 700;
+    color: #00e5ff;
+    background: rgba(0, 229, 255, 0.07);
+    border: 1px solid rgba(0, 229, 255, 0.20);
+    border-radius: 2px;
+    padding: 1px 5px;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+  .ctrl-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 7px;
+    font-weight: 400;
+    color: #3a4050;
+    letter-spacing: 0.10em;
+  }
+
   /* LEVEL BANNER */
   #level-banner {
     position: fixed;
@@ -522,6 +558,14 @@
     </div>
   </div>
   <button id="sound-btn" title="Toggle sound">🔇</button>
+</div>
+
+<!-- CONTROLS HINT (always visible) -->
+<div id="controls-hint">
+  <div class="ctrl-row"><span class="ctrl-key">↑↓←→ WASD</span><span class="ctrl-label">MOVE</span></div>
+  <div class="ctrl-row"><span class="ctrl-key">SHIFT / Z</span><span class="ctrl-label">BOOST</span></div>
+  <div class="ctrl-row"><span class="ctrl-key">X</span><span class="ctrl-label">SLOW</span></div>
+  <div class="ctrl-row"><span class="ctrl-key">SPACE</span><span class="ctrl-label">STOP</span></div>
 </div>
 
 <!-- SPEED INDICATOR -->
@@ -776,8 +820,8 @@ function drawGlowWorms() {
 const SEG_RADIUS  = 8;
 const SEG_SPACING = 16;
 const SPEED_SLOW  = 1.6;
-const SPEED_BASE  = 2.8;
-const SPEED_BOOST = 5.0;
+const SPEED_BASE  = 3.5;
+const SPEED_BOOST = 5.5;
 const LERP_DIR    = 0.09;
 const START_SEGS  = 12;
 
@@ -1293,6 +1337,207 @@ function drawRobins() {
   for (const r of robins) drawRobin(r.x, r.y, r.facingLeft);
 }
 
+// ─── BIRD FEEDER ─────────────────────────────────────────────────────────────
+const FEEDER_W         = 22;
+const FEEDER_H         = 28;
+const FEEDER_COLLECT_R = 20;
+const FEEDER_SPAWN_INT = 380;   // frames between random respawns
+const FEEDER_FIRST_F   = 300;   // forced first spawn at ~5s
+const FEEDER_DISTRACT  = 280;   // frames robins stay distracted
+
+let feeder           = null;   // { x, y, pulse } or null
+let feederSpawnTimer = 0;
+let feederFirstDone  = false;  // true once guaranteed first spawn has fired
+let feederIntroShown = false;  // one-time intro toast per game
+let feederArrow      = null;   // { x, y, age } arrow pointing to feeder
+let seedParticles    = [];     // { x, y, vx, vy, life }
+
+function spawnFeeder() {
+  if (!wSegs.length) return;
+  const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
+  let x, y, tries = 0;
+  do {
+    x = rand(80, W - 80);
+    y = rand(80, H - 80);
+    tries++;
+  } while (torusDist(x, y, hx, hy) < 140 && tries < 40);
+  feeder    = { x, y, pulse: 0 };
+  feederPos = { x, y };
+  if (!feederIntroShown) {
+    feederIntroShown = true;
+    showToast('SEED POUCH — grab it to distract the robins!', 3500);
+    feederArrow = { x, y, age: 0 };
+  }
+}
+
+function collectFeeder() {
+  if (!feeder) return;
+  const { x: fx, y: fy } = feeder;
+  feeder = null;
+  feederSpawnTimer = 0;
+  feederArrow      = null;
+  // Scatter seed particles
+  for (let i = 0; i < 14; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const spd   = rand(1.5, 4.5);
+    seedParticles.push({
+      x: fx, y: fy,
+      vx: Math.cos(angle) * spd,
+      vy: Math.sin(angle) * spd,
+      life: Math.ceil(rand(180, 280)),
+    });
+  }
+  feederPos = { x: fx, y: fy };
+  // Distract all active robins toward seed position
+  for (const r of robins) {
+    r.distracted = true;
+    r.distractT  = FEEDER_DISTRACT;
+    robinNewHop(r);
+  }
+  score += 10; updateHUD();
+  showToast('BIRD FEEDER!');
+  sfx.pixelBig();
+}
+
+function updateFeeder() {
+  if (!gameStarted || levelPaused) return;
+  // Spawn logic: forced first at FEEDER_FIRST_F frames, then random every FEEDER_SPAWN_INT
+  if (!feeder) {
+    feederSpawnTimer++;
+    const threshold = feederFirstDone ? FEEDER_SPAWN_INT : FEEDER_FIRST_F;
+    if (feederSpawnTimer >= threshold) {
+      feederFirstDone  = true;
+      feederSpawnTimer = 0;
+      spawnFeeder();
+    }
+  }
+  if (feeder) {
+    feeder.pulse += 0.07;
+    // Collection check
+    const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
+    if (torusDist(hx, hy, feeder.x, feeder.y) < FEEDER_COLLECT_R) collectFeeder();
+  }
+  // Seed particles
+  for (let i = seedParticles.length - 1; i >= 0; i--) {
+    const p = seedParticles[i];
+    p.x += p.vx; p.y += p.vy;
+    p.vx *= 0.96; p.vy *= 0.96;
+    p.life--;
+    if (p.life <= 0) { seedParticles.splice(i, 1); continue; }
+  }
+  // Keep feederPos pointing to seed centroid while particles exist
+  if (!feeder && seedParticles.length > 0) {
+    let sx = 0, sy = 0;
+    for (const p of seedParticles) { sx += p.x; sy += p.y; }
+    feederPos = { x: sx / seedParticles.length, y: sy / seedParticles.length };
+  } else if (!feeder && seedParticles.length === 0) {
+    feederPos = null;
+  }
+  // Arrow lifetime
+  if (feederArrow) {
+    feederArrow.age++;
+    if (!feeder || feederArrow.age > 240) feederArrow = null;
+  }
+}
+
+function drawFeeder() {
+  if (!gameStarted || !feeder) return;
+  const { x, y, pulse } = feeder;
+  const sc = 0.9 + Math.sin(pulse) * 0.10;  // 0.9–1.0 breathe
+  const fw = FEEDER_W * sc;
+  const fh = FEEDER_H * sc;
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.shadowColor = '#f5e642';
+  ctx.shadowBlur  = 22;
+
+  // Hook — upside-down V at top
+  ctx.strokeStyle = '#aa7733';
+  ctx.lineWidth   = 2.2;
+  ctx.lineCap     = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-6 * sc,  -fh / 2);
+  ctx.lineTo(0,         -fh / 2 - 8 * sc);
+  ctx.lineTo(6 * sc,   -fh / 2);
+  ctx.stroke();
+
+  // Body rounded rect
+  ctx.fillStyle = '#aa7733';
+  roundRectPath(-fw / 2, -fh / 2, fw, fh, 4 * sc);
+  ctx.fill();
+
+  // Three bright seed dots
+  ctx.shadowBlur  = 5;
+  ctx.fillStyle   = '#f5e642';
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath();
+    ctx.arc((-6 + i * 6) * sc, 3 * sc, 2.8 * sc, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawSeedParticles() {
+  if (!gameStarted || seedParticles.length === 0) return;
+  for (const p of seedParticles) {
+    const alpha = Math.min(1, p.life / 60);
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.fillStyle   = '#f5e642';
+    ctx.shadowColor = '#f5e642';
+    ctx.shadowBlur  = 10;
+    ctx.beginPath();
+    ctx.arc(wrapX(p.x), wrapY(p.y), 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawFeederArrow() {
+  if (!feeder || !feederArrow) return;
+  const { age, x: tx, y: ty } = feederArrow;
+  const fade = age < 180 ? 1 : Math.max(0, 1 - (age - 180) / 60);
+  if (fade <= 0) return;
+
+  // Direction from viewport center toward feeder
+  const cx2 = W / 2, cy2 = H / 2;
+  const dx = tx - cx2, dy = ty - cy2;
+  const dl = Math.hypot(dx, dy) || 1;
+  // Don't draw if feeder is very close to center
+  if (dl < 80) return;
+  const ndx = dx / dl, ndy = dy / dl;
+
+  // Find closest viewport edge intersection (with 50px margin)
+  let tMin = Infinity;
+  if (Math.abs(ndx) > 0.001) tMin = Math.min(tMin, ndx > 0 ? (W - 50 - cx2) / ndx : (50 - cx2) / ndx);
+  if (Math.abs(ndy) > 0.001) tMin = Math.min(tMin, ndy > 0 ? (H - 50 - cy2) / ndy : (50 - cy2) / ndy);
+  tMin = Math.min(tMin, dl - 60);  // don't overshoot feeder
+  if (tMin <= 0) return;
+
+  const ax = cx2 + ndx * tMin;
+  const ay = cy2 + ndy * tMin;
+  const pulse = 0.55 + Math.sin(age * 0.16) * 0.35;
+
+  ctx.save();
+  ctx.globalAlpha = fade * pulse;
+  ctx.translate(ax, ay);
+  ctx.rotate(Math.atan2(ndy, ndx));
+  ctx.strokeStyle = '#00e5ff';
+  ctx.fillStyle   = '#00e5ff';
+  ctx.shadowColor = '#00e5ff';
+  ctx.shadowBlur  = 12;
+  ctx.lineWidth   = 3;
+  ctx.lineCap     = 'round';
+  // Shaft
+  ctx.beginPath(); ctx.moveTo(-22, 0); ctx.lineTo(4, 0); ctx.stroke();
+  // Head
+  ctx.beginPath();
+  ctx.moveTo(16, 0); ctx.lineTo(4, -7); ctx.lineTo(4, 7);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
 // ─── LEVEL SYSTEM ────────────────────────────────────────────────────────────
 const LEVEL_DEFS = [
   { n: 1, name: 'DEEP SPACE',   threshold: 500      },
@@ -1509,8 +1754,9 @@ function updateWormhole() {
   }
 
   if (wh.phase === 'exit') {
-    if (wormholeExitSegs < wSegs.length) wormholeExitSegs++;
-    else wormhole = null;
+    // Reveal 4 segments per frame — fast enough to feel immediate
+    wormholeExitSegs = Math.min(wSegs.length, wormholeExitSegs + 4);
+    if (wormholeExitSegs >= wSegs.length && wh.blinkT >= 40) wormhole = null;
   }
 }
 
@@ -1547,6 +1793,10 @@ function initLevelThreats(n) {
   competitors = []; compRespawnTimers = [];
   blackHole = null; bhSpawnCounter = 0; bhPulling = false;
   bhSegsEaten = 0; bhPullSpd = SPEED_BASE; redWorms = [];
+  // Feeder resets per level; intro toast only resets for full new game (n===1)
+  feeder = null; feederSpawnTimer = 0; seedParticles = [];
+  feederArrow = null; feederFirstDone = false; feederPos = null;
+  if (n === 1) feederIntroShown = false;
   if (n === 1) initRobins();
   if (n >= 2)  initCompetitors();
   if (n === 5) initRobins();  // The Void: robins return alongside competitors
@@ -1555,7 +1805,8 @@ function initLevelThreats(n) {
 function repositionWormAtCenter() {
   const cx = W / 2, cy = H / 2;
   const keep = Math.max(START_SEGS, wSegs.length);
-  wSegs = Array.from({ length: keep }, () => ({ x: cx, y: cy }));
+  // Spread in a line so segments aren't all stacked — chain propagation needs separation
+  wSegs = Array.from({ length: keep }, (_, i) => ({ x: cx - i * SEG_SPACING, y: cy }));
   wDir = { x: 1, y: 0 }; wTarget = { x: 1, y: 0 };
   wStopped = false; wBoosting = false; wSlowing = false; wGrow = 0; wInvincible = 90;
 }
@@ -2054,14 +2305,14 @@ function drawRedWorms() {
 const toastEl = document.getElementById('toast');
 let toastTimer = null;
 
-function showToast(msg) {
+function showToast(msg, duration = 1800) {
   toastEl.textContent = msg;
   toastEl.classList.add('visible');
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     toastEl.classList.remove('visible');
     toastTimer = null;
-  }, 1800);
+  }, duration);
 }
 
 // ─── GAME STATE ──────────────────────────────────────────────────────────────
@@ -2521,7 +2772,7 @@ function frame() {
     updateWormhole();
     updatePixels();
     // Level-gated threats
-    if (currentLevel === 1 || currentLevel === 5) updateRobins();
+    if (currentLevel === 1 || currentLevel === 5) { updateRobins(); updateFeeder(); }
     if (currentLevel >= 2) updateCompetitors();
     if (currentLevel >= 3) { updateBlackHole(); updateRedWorms(); }
   }
@@ -2530,8 +2781,9 @@ function frame() {
     drawPixels();
     drawWormholeSprite();
     if (currentLevel >= 3) drawBlackHole();
+    if (currentLevel === 1 || currentLevel === 5) drawSeedParticles();
     drawWorm();
-    if (currentLevel === 1 || currentLevel === 5) drawRobins();
+    if (currentLevel === 1 || currentLevel === 5) { drawFeeder(); drawRobins(); drawFeederArrow(); }
     if (currentLevel >= 2) drawCompetitors();
     if (currentLevel >= 3) drawRedWorms();
   }
