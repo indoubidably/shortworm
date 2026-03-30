@@ -425,6 +425,39 @@
     box-shadow: 0 0 14px rgba(255,45,120,0.38);
   }
 
+  /* SPEED INDICATOR */
+  #speed-indicator {
+    position: fixed;
+    bottom: 16px;
+    left: 16px;
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 3px;
+    pointer-events: none;
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+  }
+  #speed-indicator.visible { opacity: 1; }
+  .spd-bar {
+    width: 22px;
+    height: 5px;
+    border-radius: 2px;
+    background: rgba(0, 229, 255, 0.12);
+    border: 1px solid rgba(0, 229, 255, 0.18);
+    transition: background 0.1s, box-shadow 0.1s, border-color 0.1s;
+  }
+  .spd-bar.lit-cyan {
+    background: #00e5ff;
+    border-color: #00e5ff;
+    box-shadow: 0 0 5px #00e5ff, 0 0 10px rgba(0,229,255,0.4);
+  }
+  .spd-bar.lit-yellow {
+    background: #f5e642;
+    border-color: #f5e642;
+    box-shadow: 0 0 5px #f5e642, 0 0 12px rgba(245,230,66,0.5);
+  }
+
   /* SOUND TOGGLE */
   #sound-btn {
     background: none;
@@ -491,6 +524,13 @@
   <button id="sound-btn" title="Toggle sound">🔇</button>
 </div>
 
+<!-- SPEED INDICATOR -->
+<div id="speed-indicator">
+  <div class="spd-bar" id="spd3"></div>
+  <div class="spd-bar" id="spd2"></div>
+  <div class="spd-bar" id="spd1"></div>
+</div>
+
 <!-- MENU -->
 <div id="menu">
   <div id="menu-title">SHORTWORM</div>
@@ -540,6 +580,7 @@
   </div>
   <div id="mobile-buttons">
     <div class="mob-btn" id="btn-boost" title="Boost">▲</div>
+    <div class="mob-btn" id="btn-slow"  title="Slow">▼</div>
     <div class="mob-btn" id="btn-stop"  title="Stop">■</div>
   </div>
 </div>
@@ -734,8 +775,9 @@ function drawGlowWorms() {
 // ─── PLAYER WORM ─────────────────────────────────────────────────────────────
 const SEG_RADIUS  = 8;
 const SEG_SPACING = 16;
+const SPEED_SLOW  = 1.6;
 const SPEED_BASE  = 2.8;
-const SPEED_BOOST = 5.2;
+const SPEED_BOOST = 5.0;
 const LERP_DIR    = 0.09;
 const START_SEGS  = 12;
 
@@ -744,6 +786,7 @@ let wDir        = { x: 1, y: 0 };
 let wTarget     = { x: 1, y: 0 };
 let wStopped    = false;
 let wBoosting   = false;
+let wSlowing    = false;
 let wGrow       = 0;
 let wInvincible = 0;
 let wFrame      = 0;    // frame counter for flash timing
@@ -758,6 +801,7 @@ function initWorm() {
   wTarget = { x: 1, y: 0 };
   wStopped    = false;
   wBoosting   = false;
+  wSlowing    = false;
   wGrow       = 0;
   wInvincible = 0;
   wFrame      = 0;
@@ -779,7 +823,9 @@ function updateWorm() {
       ? bhPullSpd
       : (wormhole && wormhole.phase === 'eating')
         ? wormholeEnterSpd
-        : (wBoosting ? SPEED_BOOST : SPEED_BASE);
+        : wBoosting ? SPEED_BOOST
+        : wSlowing  ? SPEED_SLOW
+        : SPEED_BASE;
     const head  = wSegs[0];
 
     // Move head — raw coords, no clamping; wrap applied at draw time
@@ -1440,7 +1486,7 @@ function updateWormhole() {
     const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
     if (Math.hypot(hx - wh.x, hy - wh.y) < WORMHOLE_TOUCH_R) {
       wh.phase = 'eating'; wormholeSegsEaten = 0;
-      wormholeEnterSpd = wBoosting ? SPEED_BOOST : SPEED_BASE;
+      wormholeEnterSpd = wBoosting ? SPEED_BOOST : wSlowing ? SPEED_SLOW : SPEED_BASE;
       sfx.wormholeEnter();
     }
   }
@@ -1511,7 +1557,7 @@ function repositionWormAtCenter() {
   const keep = Math.max(START_SEGS, wSegs.length);
   wSegs = Array.from({ length: keep }, () => ({ x: cx, y: cy }));
   wDir = { x: 1, y: 0 }; wTarget = { x: 1, y: 0 };
-  wStopped = false; wBoosting = false; wGrow = 0; wInvincible = 90;
+  wStopped = false; wBoosting = false; wSlowing = false; wGrow = 0; wInvincible = 90;
 }
 
 function doLevelTransition() {
@@ -2049,7 +2095,11 @@ document.addEventListener('keydown', e => {
       e.preventDefault();
       wStopped = !wStopped;
       break;
-    case 'ShiftLeft': case 'ShiftRight':
+    case 'KeyX':
+      e.preventDefault();
+      wSlowing = true;
+      break;
+    case 'ShiftLeft': case 'ShiftRight': case 'KeyZ':
       wBoosting = true;
       break;
   }
@@ -2057,8 +2107,13 @@ document.addEventListener('keydown', e => {
 
 document.addEventListener('keyup', e => {
   keysDown.delete(e.code);
-  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
-    wBoosting = false;
+  switch (e.code) {
+    case 'ShiftLeft': case 'ShiftRight': case 'KeyZ':
+      wBoosting = false;
+      break;
+    case 'KeyX':
+      wSlowing = false;
+      break;
   }
 });
 
@@ -2081,6 +2136,7 @@ const mobileControls = document.getElementById('mobile-controls');
 const joystickZone   = document.getElementById('joystick-zone');
 const joystickKnob   = document.getElementById('joystick-knob');
 const btnBoost       = document.getElementById('btn-boost');
+const btnSlow        = document.getElementById('btn-slow');
 const btnStop        = document.getElementById('btn-stop');
 const MAX_KNOB_DIST  = 44;
 
@@ -2140,6 +2196,18 @@ function initMobileControls() {
   btnBoost.addEventListener('touchend', () => {
     wBoosting = false;
     btnBoost.classList.remove('active');
+  });
+
+  // Slow button
+  btnSlow.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (!gameStarted) startGame();
+    wSlowing = true;
+    btnSlow.classList.add('active');
+  }, { passive: false });
+  btnSlow.addEventListener('touchend', () => {
+    wSlowing = false;
+    btnSlow.classList.remove('active');
   });
 
   // Stop button
@@ -2409,6 +2477,40 @@ const sfx = {
   },
 };
 
+// ─── SPEED INDICATOR ─────────────────────────────────────────────────────────
+const spdIndicator = document.getElementById('speed-indicator');
+const spdBar1 = document.getElementById('spd1');
+const spdBar2 = document.getElementById('spd2');
+const spdBar3 = document.getElementById('spd3');
+
+function updateSpeedIndicator() {
+  if (!gameStarted) { spdIndicator.classList.remove('visible'); return; }
+  spdIndicator.classList.add('visible');
+
+  // Determine current speed state
+  let state; // 'slow' | 'normal' | 'boost'
+  if      (wStopped)  state = 'stop';
+  else if (wBoosting) state = 'boost';
+  else if (wSlowing)  state = 'slow';
+  else                state = 'normal';
+
+  spdBar1.className = 'spd-bar';
+  spdBar2.className = 'spd-bar';
+  spdBar3.className = 'spd-bar';
+
+  if (state === 'slow') {
+    spdBar1.classList.add('lit-cyan');
+  } else if (state === 'normal') {
+    spdBar1.classList.add('lit-cyan');
+    spdBar2.classList.add('lit-cyan');
+  } else if (state === 'boost') {
+    spdBar1.classList.add('lit-yellow');
+    spdBar2.classList.add('lit-yellow');
+    spdBar3.classList.add('lit-yellow');
+  }
+  // 'stop': all bars dim
+}
+
 // ─── MAIN LOOP ───────────────────────────────────────────────────────────────
 function frame() {
   // Background (level-dependent, always animates)
@@ -2453,6 +2555,7 @@ function frame() {
     ctx.restore();
   }
 
+  updateSpeedIndicator();
   requestAnimationFrame(frame);
 }
 
