@@ -708,7 +708,7 @@
 
 <!-- CONTROLS HINT (always visible) -->
 <div id="controls-hint">
-  <div class="ctrl-row"><span class="ctrl-key">↑↓←→ WASD</span><span class="ctrl-label">MOVE</span></div>
+  <div class="ctrl-row"><span class="ctrl-key">↑↓←→ WASD</span><span class="ctrl-label">STEER / FLIP TURN</span></div>
   <div class="ctrl-row"><span class="ctrl-key">SHIFT / Z</span><span class="ctrl-label">BOOST</span></div>
   <div class="ctrl-row"><span class="ctrl-key">X</span><span class="ctrl-label">SLOW</span></div>
   <div class="ctrl-row"><span class="ctrl-key">SPACE</span><span class="ctrl-label">STOP</span></div>
@@ -967,12 +967,12 @@ function drawGlowWorms() {
 // ─── PLAYER WORM ─────────────────────────────────────────────────────────────
 const SEG_RADIUS  = 8;
 const SEG_SPACING = 16;
-const SPEED_SLOW        = 1.6;   // slow-crawl speed, constant across levels
+const SPEED_SLOW        = 2.2;   // slow-crawl speed, constant across levels
 const LERP_DIR          = 0.09;
 const START_SEGS        = 12;
 // Level-indexed base and boost cap speeds (index 0 = unused, 1–5 = levels)
-const SPEED_BASE_LEVELS  = [0, 2.8, 3.6, 4.2, 4.8, 5.4];
-const SPEED_BOOST_LEVELS = [0, 5.0, 6.2, 7.2, 8.0, 9.0];
+const SPEED_BASE_LEVELS  = [0, 4.2, 4.8, 5.2, 5.6, 6.0];
+const SPEED_BOOST_LEVELS = [0, 7.0, 7.8, 8.4, 9.0, 9.6];
 function levelBaseSpeed()  { return SPEED_BASE_LEVELS[currentLevel]  ?? 3.5; }
 function levelBoostCap()   { return SPEED_BOOST_LEVELS[currentLevel] ?? 5.5; }
 
@@ -990,6 +990,16 @@ let wSpeedBurst    = 0;     // additive bonus from pixel collection
 let wSpeedBurstT   = 0;     // frames remaining on burst
 let wPillBoost     = 0;     // flat speed bonus from speed pill (px/frame)
 let wPillBoostT    = 0;     // frames remaining on pill boost
+
+// Flip-turn state
+let flipPhase         = 0;   // 0=none  1=brake  3=accel
+let flipT             = 0;   // frames elapsed in current phase
+let flipHeadFlash     = 0;   // frames of white head flash remaining
+let flipCompress      = 0;   // visual compression factor 0–0.2
+let flipBrakeStartSpd = 0;   // base speed at moment flip was triggered
+const FLIP_BRAKE_F    = 8;
+const FLIP_ACCEL_F    = 12;
+const FLIP_BRAKE_SPD  = 1.8; // speed target at end of brake / start of accel
 
 function initWorm() {
   wSegs = [];
@@ -1010,23 +1020,57 @@ function initWorm() {
   wSpeedBurstT   = 0;
   wPillBoost     = 0;
   wPillBoostT    = 0;
+  flipPhase = 0; flipT = 0; flipHeadFlash = 0; flipCompress = 0;
+}
+
+function startFlipTurn() {
+  if (flipPhase !== 0 || wStopped) return;
+  flipBrakeStartSpd = levelBaseSpeed();
+  flipPhase     = 1;
+  flipT         = 0;
+  flipHeadFlash = FLIP_BRAKE_F;
+  flipCompress  = 0;
+  wBoostMomentum = 0;
+  wInvincible   = Math.max(wInvincible, 55);
 }
 
 function updateWorm() {
   if (!gameStarted) return;
   wFrame++;
 
-  // Lerp direction toward target
-  wDir.x += (wTarget.x - wDir.x) * LERP_DIR;
-  wDir.y += (wTarget.y - wDir.y) * LERP_DIR;
-  // Normalize
-  const dlen = Math.hypot(wDir.x, wDir.y);
-  if (dlen > 0) { wDir.x /= dlen; wDir.y /= dlen; }
+  // Flip-turn state machine — runs before direction lerp
+  if (flipPhase === 1) {
+    flipT++;
+    flipCompress = 0.2 * Math.sin((flipT / FLIP_BRAKE_F) * Math.PI);
+    if (flipHeadFlash > 0) flipHeadFlash--;
+    if (flipT >= FLIP_BRAKE_F) {
+      // Phase 2 (instant): snap direction to exact opposite
+      wDir.x = -wDir.x; wDir.y = -wDir.y;
+      wTarget.x = wDir.x; wTarget.y = wDir.y;
+      flipPhase = 3;
+      flipT     = 0;
+      flipCompress  = 0;
+      wInvincible   = Math.max(wInvincible, 55);
+    }
+  } else if (flipPhase === 3) {
+    flipT++;
+    if (flipT >= FLIP_ACCEL_F) { flipPhase = 0; flipT = 0; }
+  }
+
+  // Lerp direction toward target — frozen during brake phase
+  if (flipPhase !== 1) {
+    wDir.x += (wTarget.x - wDir.x) * LERP_DIR;
+    wDir.y += (wTarget.y - wDir.y) * LERP_DIR;
+    const dlen = Math.hypot(wDir.x, wDir.y);
+    if (dlen > 0) { wDir.x /= dlen; wDir.y /= dlen; }
+  }
 
   // Momentum: ramp up while boosting, decay when not
   const boostMax = levelBoostCap() - levelBaseSpeed();
-  if (wBoosting && !wStopped) {
+  if (wBoosting && !wStopped && flipPhase === 0) {
     wBoostMomentum = Math.min(boostMax, wBoostMomentum + 0.15);
+  } else if (flipPhase !== 0) {
+    wBoostMomentum = 0;
   } else {
     wBoostMomentum = Math.max(0, wBoostMomentum - boostMax / 30);
   }
@@ -1043,6 +1087,15 @@ function updateWorm() {
       speed = bhPullSpd;
     } else if (wormhole && wormhole.phase === 'eating') {
       speed = wormholeEnterSpd;
+    } else if (flipPhase === 1) {
+      // Brake: linear drop from start speed to FLIP_BRAKE_SPD
+      const p = flipT / FLIP_BRAKE_F;
+      speed = flipBrakeStartSpd + (FLIP_BRAKE_SPD - flipBrakeStartSpd) * p;
+    } else if (flipPhase === 3) {
+      // Accelerate: ramp from FLIP_BRAKE_SPD back to base
+      const base = levelBaseSpeed();
+      const p = flipT / FLIP_ACCEL_F;
+      speed = FLIP_BRAKE_SPD + (base - FLIP_BRAKE_SPD) * p;
     } else if (wSlowing) {
       speed = SPEED_SLOW;
     } else {
@@ -1145,25 +1198,39 @@ function drawWorm() {
   // Apply modulo wrap to raw coords for display only
   for (let i = segsToShow - 1; i >= 0; i--) {
     const seg = wSegs[i];
-    const sx  = wrapX(seg.x);
-    const sy  = wrapY(seg.y);
+    let sx  = wrapX(seg.x);
+    let sy  = wrapY(seg.y);
+
+    // Compression ripple during brake phase: shift each segment toward the one ahead
+    if (flipCompress > 0 && i > 0) {
+      const prev = wSegs[i - 1];
+      const px = wrapX(prev.x);
+      const py = wrapY(prev.y);
+      sx += (px - sx) * flipCompress;
+      sy += (py - sy) * flipCompress;
+    }
+
     const t   = i / Math.max(n - 1, 1);   // 0=head, 1=tail
     const col = wormColor(t);
     const isHead = (i === 0);
     const r      = isHead ? 11 : SEG_RADIUS;
     const blur   = isHead ? 26 : 18;
 
+    // Head flash white during brake phase
+    const headFlashing = isHead && flipHeadFlash > 0;
+    const drawColor    = headFlashing ? '#ffffff' : col.css;
+
     ctx.save();
-    ctx.shadowColor = col.css;
-    ctx.shadowBlur  = blur;
-    ctx.fillStyle   = col.css;
+    ctx.shadowColor = drawColor;
+    ctx.shadowBlur  = headFlashing ? 40 : blur;
+    ctx.fillStyle   = drawColor;
     ctx.beginPath();
     ctx.arc(sx, sy, r, 0, Math.PI * 2);
     ctx.fill();
     // Second pass for extra glow on head
     if (isHead) {
-      ctx.shadowBlur  = 40;
-      ctx.globalAlpha = 0.35;
+      ctx.shadowBlur  = headFlashing ? 60 : 40;
+      ctx.globalAlpha = headFlashing ? 0.6 : 0.35;
       ctx.beginPath();
       ctx.arc(sx, sy, r + 4, 0, Math.PI * 2);
       ctx.fill();
@@ -1305,8 +1372,18 @@ const ROBIN_START_COUNT  = 3;
 const ROBIN_MAX          = 8;
 const ROBIN_SPAWN_EVERY  = 720;   // frames between auto-spawns
 
+// ── Space-station intro ───────────────────────────────────────────────────────
+const STATION_DELAY         = 120;  // 2 s head-start before station appears
+const STATION_ENTER_FRAMES  =  55;  // fly-in duration
+const STATION_ROBIN_INTERVAL =  50; // frames between each robin release
+const STATION_DEPART_DELAY  =  90;  // pause after last robin before departing
+const STATION_LEAVE_FRAMES  =  50;  // fly-out duration
+
 let robins          = [];
 let robinSpawnTimer = 0;
+let station         = null;
+let stationDelay    = 0;
+let stationIntro    = false;
 
 // placeholder — feeder system sets this later
 let feederPos = null;
@@ -1491,15 +1568,207 @@ function robinNewHop(r) {
   r.facingLeft = r.bx < r.ax;
 }
 
+function makeRobinAt(sx, sy) {
+  const dest = randomRobinDest();
+  return {
+    x: sx, y: sy, ax: sx, ay: sy, bx: dest.x, by: dest.y,
+    hopDur: Math.floor(rand(42, 68)), hopT: 0, arcH: rand(18, 46),
+    facingLeft: dest.x < sx, distracted: false, distractT: 0, bounceT: 0
+  };
+}
+
+// ── space station ─────────────────────────────────────────────────────────────
+function spawnStation() {
+  const targetX = W * 0.72, targetY = H * 0.18;
+  station = {
+    x: W + 80,          // start off right edge
+    y: targetY,
+    targetX, targetY,
+    startX: W + 80,
+    phase: 'entering',  // 'entering' | 'hovering' | 'departing'
+    t: 0,               // frames in current phase
+    dishAngle: 0,
+    bobBase: targetY,
+    robinsReleased: 0,
+    robinTimer: 0,
+    releaseFlashT: 0,
+    departDelay: 0,
+  };
+}
+
+function updateStation() {
+  if (!station) return;
+  station.t++;
+  station.dishAngle += 0.025;
+
+  if (station.phase === 'entering') {
+    const p = Math.min(station.t / STATION_ENTER_FRAMES, 1);
+    const ease = 1 - Math.pow(1 - p, 3); // ease-out cubic
+    station.x = station.startX + (station.targetX - station.startX) * ease;
+    if (p >= 1) {
+      station.x = station.targetX;
+      station.phase = 'hovering';
+      station.t = 0;
+      station.robinTimer = STATION_ROBIN_INTERVAL; // release first robin soon
+    }
+  } else if (station.phase === 'hovering') {
+    station.y = station.bobBase + Math.sin(station.t * 0.045) * 3;
+    station.robinTimer--;
+    if (station.releaseFlashT > 0) station.releaseFlashT--;
+
+    if (station.robinTimer <= 0 && station.robinsReleased < ROBIN_START_COUNT) {
+      // Release a robin from docking bay
+      robins.push(makeRobinAt(station.x, station.y + 14));
+      station.robinsReleased++;
+      station.robinTimer = STATION_ROBIN_INTERVAL;
+      station.releaseFlashT = 12;
+    }
+
+    if (station.robinsReleased >= ROBIN_START_COUNT) {
+      station.departDelay++;
+      if (station.departDelay >= STATION_DEPART_DELAY) {
+        station.phase = 'departing';
+        station.t = 0;
+        station.departX = station.x;
+      }
+    }
+  } else if (station.phase === 'departing') {
+    const p = Math.min(station.t / STATION_LEAVE_FRAMES, 1);
+    const ease = p * p; // ease-in
+    station.x = station.departX + (W + 120 - station.departX) * ease;
+    if (p >= 1) {
+      station = null;
+      stationIntro = false;
+    }
+  }
+}
+
+function drawStation() {
+  if (!station) return;
+  const { x, y, dishAngle, releaseFlashT } = station;
+  const cx = x, cy = y;
+
+  ctx.save();
+
+  // Body glow
+  ctx.shadowColor = '#00e5ff';
+  ctx.shadowBlur  = 10;
+
+  // Main body
+  ctx.beginPath();
+  roundRectPath(cx - 30, cy - 9, 60, 18, 5);
+  ctx.fillStyle   = '#040c1a';
+  ctx.fill();
+  ctx.strokeStyle = '#00e5ff';
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+
+  // Solar panels (left + right)
+  ctx.shadowColor = '#9900ff';
+  ctx.shadowBlur  = 7;
+  for (const side of [-1, 1]) {
+    ctx.beginPath();
+    roundRectPath(cx + side * 38 - (side === 1 ? 22 : 0), cy - 5, 22, 10, 2);
+    ctx.fillStyle   = '#12002e';
+    ctx.fill();
+    ctx.strokeStyle = '#9900ff';
+    ctx.lineWidth   = 1;
+    ctx.stroke();
+    // Panel cells
+    ctx.strokeStyle = 'rgba(153,0,255,0.3)';
+    ctx.lineWidth   = 0.5;
+    for (let i = 1; i < 3; i++) {
+      ctx.beginPath();
+      ctx.moveTo(cx + side * 38 - (side === 1 ? 22 : 0) + i * (22/3), cy - 5);
+      ctx.lineTo(cx + side * 38 - (side === 1 ? 22 : 0) + i * (22/3), cy + 5);
+      ctx.stroke();
+    }
+  }
+
+  // Rotating dish
+  ctx.shadowColor = '#00e5ff';
+  ctx.shadowBlur  = 6;
+  ctx.save();
+  ctx.translate(cx + 10, cy - 9);
+  ctx.rotate(dishAngle);
+  ctx.beginPath();
+  ctx.arc(0, 0, 6, Math.PI, 0, false);
+  ctx.strokeStyle = '#00e5ff';
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(0, 0); ctx.lineTo(0, -6);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(0, -6, 1.5, 0, Math.PI * 2);
+  ctx.fillStyle = '#00e5ff';
+  ctx.fill();
+  ctx.restore();
+
+  // Docking bay indicator lights (3 pulsing dots at bottom)
+  const pulse = 0.5 + 0.5 * Math.sin(Date.now() * 0.006);
+  const lightColors = ['#00ff88', '#ffdd00', '#ff4444'];
+  for (let i = 0; i < 3; i++) {
+    const lx = cx - 8 + i * 8;
+    const ly = cy + 10;
+    ctx.beginPath();
+    ctx.arc(lx, ly, 2, 0, Math.PI * 2);
+    ctx.fillStyle = lightColors[i];
+    ctx.shadowColor = lightColors[i];
+    ctx.shadowBlur  = 4 + pulse * 5;
+    ctx.globalAlpha = 0.6 + pulse * 0.4;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // Release flash
+  if (releaseFlashT > 0) {
+    const fa = releaseFlashT / 12;
+    ctx.beginPath();
+    ctx.arc(cx, cy + 14, 12 + (1 - fa) * 8, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255,255,255,${fa * 0.8})`;
+    ctx.lineWidth   = 2;
+    ctx.shadowColor = '#ffffff';
+    ctx.shadowBlur  = 12;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
 // ── robin update ──────────────────────────────────────────────────────────────
 function initRobins() {
   robins          = [];
   robinSpawnTimer = 0;
-  for (let i = 0; i < ROBIN_START_COUNT; i++) robins.push(makeRobin(false));
+  station         = null;
+  stationDelay    = STATION_DELAY;
+  stationIntro    = true;
 }
 
 function updateRobins() {
   if (!gameStarted) return;
+
+  // Space station intro sequence
+  if (stationIntro) {
+    if (!station) {
+      if (stationDelay > 0) { stationDelay--; }
+      else spawnStation();
+    } else {
+      updateStation();
+    }
+    // Still animate any robins already released, but skip auto-spawn and collision
+    for (const r of robins) {
+      if (r.distracted && --r.distractT <= 0) r.distracted = false;
+      if (r.bounceT > 0) r.bounceT--;
+      r.hopT++;
+      const progress = r.hopT / r.hopDur;
+      r.x = r.ax + (r.bx - r.ax) * progress;
+      r.y = r.ay + (r.by - r.ay) * progress - Math.sin(progress * Math.PI) * r.arcH;
+      r.facingLeft = r.bx < r.ax;
+      if (r.hopT >= r.hopDur) { r.x = r.bx; r.y = r.by; robinNewHop(r); }
+    }
+    return;
+  }
 
   // Auto-spawn up to cap
   robinSpawnTimer++;
@@ -3667,7 +3936,7 @@ function drawWormholeSprite() {
 
 // ─── LEVEL TRANSITIONS ───────────────────────────────────────────────────────
 function initLevelThreats(n) {
-  robins = []; robinSpawnTimer = 0;
+  robins = []; robinSpawnTimer = 0; station = null; stationDelay = 0; stationIntro = false;
   competitors = []; compRespawnTimers = [];
   blackHole = null; bhSpawnCounter = 0; bhPulling = false;
   bhSegsEaten = 0; bhPullSpd = levelBaseSpeed(); redWorms = [];
@@ -3794,12 +4063,14 @@ function respawn() {
   wStopped = false; wBoosting = false; wSlowing = false;
   wGrow    = 0;
   wPillBoost = 0; wPillBoostT = 0;
+  flipPhase = 0; flipT = 0; flipHeadFlash = 0; flipCompress = 0;
   wInvincible = 220;
   energyMaxSegs = Math.max(12, wSegs.length);
   energyBarDisplay = wSegs.length;
   energyBarFlash = 0;
   energyCriticalAlerted = false;
   showToast('BACK IN ACTION', 2000, '#00e5ff');
+  if (currentLevel === 1 || currentLevel === 5) initRobins();
 }
 
 // ─── COMPETITOR WORMS ────────────────────────────────────────────────────────
@@ -5033,13 +5304,17 @@ document.addEventListener('keyup', e => {
 });
 
 function setTarget(x, y) {
-  // Prevent reversing into self: ignore exact opposite direction
-  if (wSegs.length > 1) {
+  // Detect flip turn: proposed direction is roughly opposite to current
+  if (x * wDir.x + y * wDir.y < -0.65 && flipPhase === 0 && !wStopped) {
+    startFlipTurn();
+    return;
+  }
+  // When not flipping, still block exact reverse to prevent self-collision
+  if (flipPhase === 0 && wSegs.length > 1) {
     const dx = wSegs[0].x - wSegs[1].x;
     const dy = wSegs[0].y - wSegs[1].y;
     const dl = Math.hypot(dx, dy) || 1;
     const nx = dx / dl, ny = dy / dl;
-    // dot product of proposed vs current velocity
     if (x * nx + y * ny < -0.7) return;
   }
   wTarget.x = x;
@@ -5144,10 +5419,16 @@ function updateJoystick(cx, cy) {
   joystickKnob.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
 
   if (dist > 8) {
-    wTarget.x = dx / MAX_KNOB_DIST;
-    wTarget.y = dy / MAX_KNOB_DIST;
-    const len = Math.hypot(wTarget.x, wTarget.y);
-    if (len > 0) { wTarget.x /= len; wTarget.y /= len; }
+    const nx = dx / MAX_KNOB_DIST;
+    const ny = dy / MAX_KNOB_DIST;
+    if (nx * wDir.x + ny * wDir.y < -0.65 && flipPhase === 0 && !wStopped) {
+      startFlipTurn();
+    } else {
+      wTarget.x = nx;
+      wTarget.y = ny;
+      const len = Math.hypot(wTarget.x, wTarget.y);
+      if (len > 0) { wTarget.x /= len; wTarget.y /= len; }
+    }
   }
 }
 
@@ -5580,7 +5861,7 @@ function frame() {
     drawPoisonPixels();
     drawPoisonExplosions();
     drawWorm();
-    if (currentLevel === 1 || currentLevel === 5) { drawFeeder(); drawRobins(); drawFeederArrow(); }
+    if (currentLevel === 1 || currentLevel === 5) { drawFeeder(); drawRobins(); drawFeederArrow(); drawStation(); }
     if (alienShips.length > 0) drawShips();
     if (currentLevel >= 2) drawCompetitors();
     if (currentLevel >= 4) drawRedWorms();
