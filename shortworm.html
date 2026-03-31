@@ -463,6 +463,37 @@
     box-shadow: 0 0 5px #ff2d78, 0 0 14px rgba(255,45,120,0.6);
   }
 
+  /* LEVEL HUD */
+  #level-hud {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    text-align: center;
+    pointer-events: none;
+    z-index: 10;
+    background: rgba(11,12,26,0.82);
+    border: 1px solid rgba(0,229,255,0.28);
+    backdrop-filter: blur(6px);
+    border-radius: 4px;
+    padding: 7px 14px 8px;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  #level-hud.visible { opacity: 1; }
+  #level-hud-num {
+    font-size: 10px;
+    font-weight: 700;
+    color: #00e5ff;
+    letter-spacing: 0.15em;
+  }
+  #level-hud-name {
+    font-size: 8px;
+    font-weight: 400;
+    color: #8a9099;
+    margin-top: 2px;
+  }
+
   /* SOUND TOGGLE */
   #sound-btn {
     background: none;
@@ -563,6 +594,12 @@
     </div>
   </div>
   <button id="sound-btn" title="Toggle sound">🔇</button>
+</div>
+
+<!-- LEVEL HUD -->
+<div id="level-hud">
+  <div id="level-hud-num">LEVEL 1</div>
+  <div id="level-hud-name">DEEP SPACE</div>
 </div>
 
 <!-- CONTROLS HINT (always visible) -->
@@ -1078,7 +1115,7 @@ function updatePixels() {
 
     // Collection check (toroidal)
     if (dist < SEG_RADIUS + p.type.r) {
-      score += p.type.pts;
+      score += Math.round(p.type.pts * cnstScoreMult);
       wGrow += Math.ceil(p.type.pts / 6);
       updateHUD();
 
@@ -1835,7 +1872,7 @@ function updatePoisonPixels() {
     }
   }
   // Phase 2 ONLY: player head collision (phase 1 is safe)
-  if (wInvincible === 0 && wSegs.length > 0) {
+  if (wInvincible === 0 && wSegs.length > 0 && !cnstPoisonSafe) {
     const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
     for (let i = poisonPixels.length - 1; i >= 0; i--) {
       const pp = poisonPixels[i];
@@ -2310,7 +2347,7 @@ function drawShips() {
 const LEVEL_DEFS = [
   { n: 1, name: 'DEEP SPACE',   threshold: 500      },
   { n: 2, name: 'THE BELT',     threshold: 1500     },
-  { n: 3, name: 'THE CORRIDOR', threshold: 3500     },
+  { n: 3, name: 'CONSTELLATION CORRIDOR', threshold: 3500     },
   { n: 4, name: 'NEON CITY',    threshold: 7000     },
   { n: 5, name: 'THE VOID',     threshold: Infinity },
 ];
@@ -2392,10 +2429,14 @@ function drawBackground() {
   } else {
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, W, H);
-    drawStars();
+    if (n === 3) {
+      drawScrollingStars();
+      drawNebulae();
+    } else {
+      drawStars();
+    }
     drawGlowWorms();
     if (n === 2) drawPlanets();
-    if (n === 3) drawNebulae();
   }
 }
 
@@ -2464,8 +2505,952 @@ function drawGrid() {
   ctx.restore();
 }
 
+// ─── CONSTELLATION CORRIDOR (Level 3) ────────────────────────────────────────
+
+const L3_SCROLL      = 0.6;   // px per frame background scroll
+const CNST_PROX      = 150;   // px from worm head → starts waking
+const CNST_WAKE_T    = 280;   // frames after prox → fully waking
+const CNST_ACTIVE_T  = 360;   // frames → becomes active
+const CNST_CYCLE_F   = 600;   // frames active before sleeping
+const CNST_SLEEP_F   = 60;    // fade-out frames when sleeping
+const CNST_HEART_R   = 150;   // heart-star touch radius for worm
+const CNST_SPAWN_MIN = 400;   // min frames between new constellation
+const CNST_SPAWN_MAX = 600;
+const MAX_HARM_ACTIVE = 2;
+const MAX_BENE_ACTIVE = 1;
+
+let bgScrollX       = 0;
+let bgScrollStars   = [];
+let constellations  = [];
+let cnstCreatures   = [];
+let cnstSpawnTimer  = 0;
+let cnstRetired     = new Set();
+let cnstScoreMult   = 1;
+let cnstScoreMultT  = 0;
+let cnstPoisonSafe  = false;
+let cnstPoisonSafeT = 0;
+let cnstRainbowT    = 0;
+
+// ── 17 constellation definitions ──────────────────────────────────────────────
+// stars: relative pixel coords centred at 0,0 (box ~180×140)
+// lines: pairs of star indices
+// heartStar: index of the special heart star
+// type: 'harmful' | 'beneficial' | 'wildcard'
+// creature: creature-type string used by movement/drawing code
+const CNST_DEFS = {
+  // ── HARMFUL ──────────────────────────────────────────────────────────────
+  orion: {
+    type: 'harmful', creature: 'meteor',
+    count: [2,4],
+    stars: [
+      { x:-80, y:-60 }, { x:-50, y:-40 }, { x:-20, y:-20 },  // belt left→mid
+      { x: 20, y:-20 }, { x: 50, y:-40 }, { x: 80, y:-60 },  // belt mid→right
+      { x:-60, y:-80 }, { x: 60, y:-80 },                     // shoulders
+      { x:-40, y: 50 }, { x: 40, y: 50 },                     // feet
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[6,2],[7,3],[2,8],[3,9]],
+    heartStar: 2,
+  },
+  scorpius: {
+    type: 'harmful', creature: 'spike',
+    count: [3,5],
+    stars: [
+      { x:  0, y:-70 }, { x:-15, y:-45 }, { x:-25, y:-20 },
+      { x:-15, y:  5 }, { x:  5, y: 25 }, { x: 20, y: 50 },
+      { x: 10, y: 70 }, { x:-10, y: 80 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7]],
+    heartStar: 3,
+  },
+  draco: {
+    type: 'harmful', creature: 'bolt',
+    count: [2,4],
+    stars: [
+      { x:-80, y: 30 }, { x:-55, y: 10 }, { x:-25, y:-10 },
+      { x:  5, y:-30 }, { x: 35, y:-20 }, { x: 65, y: 10 },
+      { x: 80, y: 40 }, { x: 60, y: 65 }, { x: 35, y: 55 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,8],[8,4]],
+    heartStar: 4,
+  },
+  serpens: {
+    type: 'harmful', creature: 'snake',
+    count: [1,3],
+    stars: [
+      { x:-75, y:-20 }, { x:-50, y: 10 }, { x:-20, y: 30 },
+      { x: 10, y: 20 }, { x: 35, y:-10 }, { x: 55, y: 20 },
+      { x: 70, y: 50 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6]],
+    heartStar: 3,
+  },
+  hydra: {
+    type: 'harmful', creature: 'wriggler',
+    count: [2,4],
+    stars: [
+      { x:-85, y: 10 }, { x:-60, y:-15 }, { x:-30, y: 0 },
+      { x:  0, y:-20 }, { x: 30, y: 5  }, { x: 55, y:-10 },
+      { x: 80, y: 10 }, { x: 60, y: 35 }, { x: 20, y: 30 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,8],[8,2]],
+    heartStar: 3,
+  },
+  aries: {
+    type: 'harmful', creature: 'pulsar',
+    count: [2,3],
+    stars: [
+      { x:-50, y:-10 }, { x:-20, y:-35 }, { x: 15, y:-35 },
+      { x: 45, y:-10 }, { x: 30, y: 25 }, { x:-10, y: 25 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,0]],
+    heartStar: 1,
+  },
+  taurus: {
+    type: 'harmful', creature: 'hornet',
+    count: [3,5],
+    stars: [
+      { x:-70, y: 20 }, { x:-40, y:-10 }, { x:  0, y:-20 },
+      { x: 40, y:-10 }, { x: 70, y: 20 }, { x: 10, y: 30 },
+      { x:-10, y: 30 }, { x:  0, y: 55 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[1,6],[3,5],[5,7],[6,7]],
+    heartStar: 2,
+  },
+  canis: {
+    type: 'harmful', creature: 'chaser',
+    count: [1,2],
+    stars: [
+      { x:-40, y:-50 }, { x:-10, y:-25 }, { x: 20, y:-25 },
+      { x: 45, y:-40 }, { x: 55, y:-10 }, { x: 40, y: 20 },
+      { x: 15, y: 40 }, { x:-15, y: 50 }, { x:-35, y: 30 },
+      { x:-45, y:  0 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,8],[8,9],[9,1]],
+    heartStar: 1,
+  },
+  gemini: {
+    type: 'harmful', creature: 'twin',
+    count: [2,4],
+    stars: [
+      { x:-45, y:-60 }, { x:-45, y:-30 }, { x:-45, y:  0 },
+      { x:-45, y: 30  }, { x:-45, y: 60 },
+      { x: 45, y:-60 }, { x: 45, y:-30 }, { x: 45, y:  0 },
+      { x: 45, y: 30  }, { x: 45, y: 60 },
+      { x:  0, y:-50 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[5,6],[6,7],[7,8],[8,9],[0,10],[5,10]],
+    heartStar: 10,
+  },
+  leo: {
+    type: 'harmful', creature: 'rusher',
+    count: [2,3],
+    stars: [
+      { x:-60, y: 30 }, { x:-40, y:-10 }, { x:-10, y:-40 },
+      { x: 20, y:-50 }, { x: 50, y:-30 }, { x: 65, y: 10 },
+      { x: 45, y: 45 }, { x: 10, y: 55 }, { x:-20, y: 40 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,8],[8,0],[3,8]],
+    heartStar: 3,
+  },
+  // ── BENEFICIAL ───────────────────────────────────────────────────────────
+  lyra: {
+    type: 'beneficial', creature: 'drifter',
+    count: [1,2],
+    stars: [
+      { x:  0, y:-65 }, { x:-35, y:-10 }, { x:-50, y: 40 },
+      { x:  0, y: 60 }, { x: 50, y: 40 }, { x: 35, y:-10 },
+    ],
+    lines: [[0,1],[0,5],[1,2],[5,4],[2,3],[4,3],[1,5]],
+    heartStar: 0,
+  },
+  corona: {
+    type: 'beneficial', creature: 'orb',
+    count: [2,3],
+    stars: [
+      { x:  0, y:-65 }, { x: 40, y:-45 }, { x: 62, y:-10 },
+      { x: 50, y: 30 }, { x: 20, y: 55 }, { x:-20, y: 55 },
+      { x:-50, y: 30 }, { x:-62, y:-10 }, { x:-40, y:-45 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,7],[7,8],[8,0]],
+    heartStar: 0,
+  },
+  cygnus: {
+    type: 'beneficial', creature: 'glider',
+    count: [2,4],
+    stars: [
+      { x:  0, y:-65 }, { x:  0, y:-20 }, { x:  0, y: 30 },
+      { x:  0, y: 65 }, { x:-70, y:  0 }, { x:-35, y: 0  },
+      { x: 35, y:  0 }, { x: 70, y:  0 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[4,5],[5,1],[1,6],[6,7]],
+    heartStar: 1,
+  },
+  papilio: {
+    type: 'beneficial', creature: 'sparkle',
+    count: [3,6],
+    stars: [
+      { x:  0, y:  0 }, { x:-40, y:-40 }, { x:-75, y:-20 },
+      { x:-75, y: 20 }, { x:-40, y: 40 }, { x: 40, y:-40 },
+      { x: 75, y:-20 }, { x: 75, y: 20 }, { x: 40, y: 40 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,0],[0,5],[5,6],[6,7],[7,8],[8,0]],
+    heartStar: 0,
+  },
+  auriga: {
+    type: 'beneficial', creature: 'ring',
+    count: [2,4],
+    stars: [
+      { x:  0, y:-60 }, { x: 55, y:-20 }, { x: 55, y: 35 },
+      { x:  0, y: 60 }, { x:-55, y: 35 }, { x:-55, y:-20 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,0],[0,3],[1,4]],
+    heartStar: 0,
+  },
+  // ── WILDCARD ─────────────────────────────────────────────────────────────
+  virgo: {
+    type: 'wildcard', creature: 'wisp',
+    count: [2,4],
+    stars: [
+      { x:  0, y:-70 }, { x:-30, y:-35 }, { x: 30, y:-35 },
+      { x:-55, y: 10 }, { x: 55, y: 10 }, { x:-35, y: 55 },
+      { x: 35, y: 55 },
+    ],
+    lines: [[0,1],[0,2],[1,3],[2,4],[3,5],[4,6],[5,6]],
+    heartStar: 0,
+  },
+  pisces: {
+    type: 'wildcard', creature: 'bubble',
+    count: [3,5],
+    stars: [
+      { x:-55, y:-50 }, { x:-35, y:-30 }, { x:-10, y:-10 },
+      { x: 10, y: 10 }, { x: 35, y: 30 }, { x: 55, y: 50 },
+      { x:-55, y: 50 }, { x:-35, y: 30 }, { x: 55, y:-50 },
+      { x: 35, y:-30 },
+    ],
+    lines: [[0,1],[1,2],[2,3],[3,4],[4,5],[2,7],[2,9],[7,6],[9,8]],
+    heartStar: 2,
+  },
+};
+
+// ── Constellation init / spawn ─────────────────────────────────────────────
+function initConstellations() {
+  bgScrollX = 0;
+  bgScrollStars = [];
+  constellations = [];
+  cnstCreatures = [];
+  cnstSpawnTimer = Math.floor(rand(CNST_SPAWN_MIN, CNST_SPAWN_MAX));
+  cnstRetired = new Set();
+  cnstScoreMult = 1; cnstScoreMultT = 0;
+  cnstPoisonSafe = false; cnstPoisonSafeT = 0;
+  cnstRainbowT = 0;
+
+  // 200 parallax background stars (3 depth layers)
+  for (let i = 0; i < 200; i++) {
+    const layer = Math.floor(Math.random() * 3); // 0 slow, 1 mid, 2 fast
+    bgScrollStars.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: layer === 2 ? rand(1.2, 2.0) : layer === 1 ? rand(0.7, 1.3) : rand(0.3, 0.7),
+      alpha: rand(0.4, 1.0),
+      layer,
+      speed: [0.2, 0.4, 0.7][layer],
+    });
+  }
+
+  // Pre-place 4 constellations spaced across and just off-screen right
+  const ids = Object.keys(CNST_DEFS);
+  const picks = [];
+  while (picks.length < 4) {
+    const id = ids[Math.floor(Math.random() * ids.length)];
+    if (!picks.includes(id)) picks.push(id);
+  }
+  for (let i = 0; i < 4; i++) {
+    _spawnCnst(W + 200 + i * 380, picks[i]);
+  }
+}
+
+function _pickCnstId() {
+  const ids = Object.keys(CNST_DEFS);
+  // weighted: harmful×7, beneficial×2, wildcard×1
+  const pool = [];
+  for (const id of ids) {
+    const def = CNST_DEFS[id];
+    const w = def.type === 'harmful' ? 7 : def.type === 'beneficial' ? 2 : 1;
+    for (let i = 0; i < w; i++) pool.push(id);
+  }
+  // Avoid recently retired (last 3)
+  const eligible = pool.filter(id => !cnstRetired.has(id));
+  const src = eligible.length > 0 ? eligible : pool;
+  return src[Math.floor(Math.random() * src.length)];
+}
+
+function _spawnCnst(screenX, forceId) {
+  const id = forceId || _pickCnstId();
+  const def = CNST_DEFS[id];
+  const screenY = rand(H * 0.2, H * 0.8);
+  constellations.push({
+    id,
+    def,
+    screenX,
+    screenY,
+    state: 'dormant',   // dormant → waking → active → sleeping
+    wakeTimer: 0,
+    activeTimer: 0,
+    sleepTimer: 0,
+    lineProgress: 0,
+    heartPulse: 0,
+    heartTouched: false,
+    creaturesReleased: false,
+    opacity: 0.18,      // dormant baseline
+  });
+}
+
+// ── Main update ───────────────────────────────────────────────────────────────
+function updateConstellations() {
+  if (!gameStarted || levelPaused) return;
+
+  // Scroll stars
+  bgScrollX += L3_SCROLL;
+  for (const s of bgScrollStars) {
+    s.x -= s.speed;
+    if (s.x < -4) s.x += W + 4;
+  }
+
+  // Spawn timer
+  cnstSpawnTimer--;
+  if (cnstSpawnTimer <= 0) {
+    cnstSpawnTimer = Math.floor(rand(CNST_SPAWN_MIN, CNST_SPAWN_MAX));
+    _spawnCnst(W + 180);
+  }
+
+  // Effect timers
+  if (cnstScoreMultT > 0) { cnstScoreMultT--; if (cnstScoreMultT === 0) cnstScoreMult = 1; }
+  if (cnstPoisonSafeT > 0) { cnstPoisonSafeT--; if (cnstPoisonSafeT === 0) cnstPoisonSafe = false; }
+  if (cnstRainbowT > 0) cnstRainbowT--;
+
+  const hx = wSegs.length > 0 ? wrapX(wSegs[0].x) : -9999;
+  const hy = wSegs.length > 0 ? wrapY(wSegs[0].y) : -9999;
+
+  // Count active harmful/beneficial for cap enforcement
+  let activeH = 0, activeB = 0;
+  for (const c of constellations) {
+    if (c.state === 'active') {
+      if (c.def.type === 'harmful') activeH++;
+      else if (c.def.type === 'beneficial') activeB++;
+    }
+  }
+
+  for (let i = constellations.length - 1; i >= 0; i--) {
+    const c = constellations[i];
+
+    // Scroll all constellations left
+    c.screenX -= L3_SCROLL;
+
+    // Remove when far off-screen left
+    if (c.screenX < -350) {
+      _cnstFadeCreatures(c.id);
+      constellations.splice(i, 1);
+      // Add to retired ring buffer (keep last 3)
+      cnstRetired.add(c.id);
+      if (cnstRetired.size > 3) {
+        const oldest = cnstRetired.values().next().value;
+        cnstRetired.delete(oldest);
+      }
+      continue;
+    }
+
+    c.heartPulse += 0.06;
+    _updateCnstState(c, hx, hy, activeH, activeB);
+  }
+
+  // Update creatures
+  for (let i = cnstCreatures.length - 1; i >= 0; i--) {
+    const cr = cnstCreatures[i];
+    if (cr.state === 'dead') { cnstCreatures.splice(i, 1); continue; }
+
+    // Scroll creature with background
+    cr.x -= L3_SCROLL;
+    if (cr.x < -80) { cr.state = 'dead'; continue; }
+
+    if (cr.state === 'fading') {
+      cr.fadeAlpha -= 0.04;
+      if (cr.fadeAlpha <= 0) { cr.state = 'dead'; continue; }
+    } else {
+      _moveCnstCreature(cr, hx, hy);
+      _checkCnstCreatureCollision(cr, hx, hy);
+    }
+  }
+}
+
+function _updateCnstState(c, hx, hy, activeH, activeB) {
+  const cx = c.screenX, cy = c.screenY;
+  const dist = Math.hypot(hx - cx, hy - cy);
+
+  // Heart star touch check
+  if (!c.heartTouched && dist < CNST_HEART_R && c.state !== 'sleeping') {
+    _onHeartTouch(c);
+    return;
+  }
+
+  if (c.state === 'dormant') {
+    c.opacity = 0.18;
+    if (dist < CNST_PROX) {
+      // Check cap before allowing wake
+      const wouldExceed = (c.def.type === 'harmful' && activeH >= MAX_HARM_ACTIVE) ||
+                          (c.def.type === 'beneficial' && activeB >= MAX_BENE_ACTIVE);
+      if (!wouldExceed) {
+        c.state = 'waking';
+        c.wakeTimer = 0;
+        c.lineProgress = 0;
+      }
+    }
+
+  } else if (c.state === 'waking') {
+    c.wakeTimer++;
+    c.lineProgress = Math.min(1, c.wakeTimer / CNST_WAKE_T);
+    c.opacity = 0.18 + 0.62 * c.lineProgress;
+
+    if (c.wakeTimer >= CNST_ACTIVE_T) {
+      c.state = 'active';
+      c.activeTimer = 0;
+      if (!c.creaturesReleased) {
+        _releaseCreatures(c);
+        c.creaturesReleased = true;
+      }
+      if (c.def.type === 'beneficial') _activateBenefit(c);
+    }
+
+  } else if (c.state === 'active') {
+    c.opacity = 0.80;
+    c.activeTimer++;
+    if (c.activeTimer >= CNST_CYCLE_F) {
+      c.state = 'sleeping';
+      c.sleepTimer = 0;
+      _cnstFadeCreatures(c.id);
+    }
+
+  } else if (c.state === 'sleeping') {
+    c.sleepTimer++;
+    c.opacity = Math.max(0.05, 0.80 * (1 - c.sleepTimer / CNST_SLEEP_F));
+    if (c.sleepTimer >= CNST_SLEEP_F) {
+      c.state = 'dormant';
+      c.wakeTimer = 0;
+      c.creaturesReleased = false;
+      c.heartTouched = false;
+    }
+  }
+}
+
+function _onHeartTouch(c) {
+  c.heartTouched = true;
+  if (c.def.type === 'harmful') {
+    // Neutralise: send to sleep immediately
+    c.state = 'sleeping';
+    c.sleepTimer = 0;
+    _cnstFadeCreatures(c.id);
+    showToast('CONSTELLATION NEUTRALISED!', 1800, '#00e5ff');
+    sfx.snap && sfx.snap();
+  } else if (c.def.type === 'beneficial') {
+    // Accelerate activation
+    c.state = 'active';
+    c.activeTimer = 0;
+    if (!c.creaturesReleased) {
+      _releaseCreatures(c);
+      c.creaturesReleased = true;
+    }
+    _activateBenefit(c);
+    showToast('CONSTELLATION ACTIVATED!', 1800, '#f5e642');
+  } else {
+    // Wildcard: coin-flip
+    if (Math.random() < 0.5) {
+      c.state = 'sleeping'; c.sleepTimer = 0; _cnstFadeCreatures(c.id);
+      showToast('WILDCARD: SAFE!', 1800, '#00e5ff');
+    } else {
+      c.state = 'active'; c.activeTimer = 0;
+      if (!c.creaturesReleased) { _releaseCreatures(c); c.creaturesReleased = true; }
+      showToast('WILDCARD: DANGER!', 1800, '#ff2d78');
+    }
+  }
+}
+
+function _activateBenefit(c) {
+  switch (c.id) {
+    case 'lyra':
+      // +300 score burst
+      score += 300; updateHUD();
+      showToast('LYRA: +300 BONUS!', 2000, '#f5e642');
+      break;
+    case 'corona':
+      // 2× score multiplier for 10 seconds
+      cnstScoreMult = 2;
+      cnstScoreMultT = 600;
+      showToast('CORONA BOREALIS: 2× SCORE!', 2200, '#f5e642');
+      break;
+    case 'cygnus':
+      // Restore 1 life (capped at 3)
+      if (lives < 3) { lives++; updateHUD(); }
+      showToast('CYGNUS: LIFE RESTORED!', 2200, '#00e5ff');
+      break;
+    case 'papilio':
+      // Poison immunity for 8 seconds
+      cnstPoisonSafe = true;
+      cnstPoisonSafeT = 480;
+      showToast('PAPILIO: POISON IMMUNE!', 2200, '#aaff00');
+      break;
+    case 'auriga':
+      // Rainbow burst: double-score next 20 pixels (reuse cnstScoreMult briefly)
+      cnstRainbowT = 400;
+      cnstScoreMult = Math.max(cnstScoreMult, 1.5);
+      cnstScoreMultT = Math.max(cnstScoreMultT, 400);
+      showToast('AURIGA: RAINBOW BOOST!', 2200, '#f5e642');
+      break;
+  }
+}
+
+function _releaseCreatures(c) {
+  const def = c.def;
+  const count = Math.floor(rand(def.count[0], def.count[1] + 1));
+  _spawnCnstCreatures(c, def.creature, count, c.screenX, c.screenY);
+}
+
+function _spawnCnstCreatures(c, type, count, ox, oy) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const spread = rand(30, 80);
+    cnstCreatures.push({
+      cnstId: c.id,
+      type,
+      x: ox + Math.cos(angle) * spread,
+      y: oy + Math.sin(angle) * spread,
+      vx: 0, vy: 0,
+      angle: Math.random() * Math.PI * 2,
+      phase: Math.random() * Math.PI * 2,
+      t: 0,
+      state: 'active',
+      fadeAlpha: 1,
+      r: 7,
+    });
+  }
+}
+
+function _cnstFadeCreatures(cnstId) {
+  for (const cr of cnstCreatures) {
+    if (cr.cnstId === cnstId && cr.state === 'active') {
+      cr.state = 'fading';
+      cr.fadeAlpha = 1;
+    }
+  }
+}
+
+function _moveCnstCreature(cr, hx, hy) {
+  cr.t++;
+  const dx = hx - cr.x, dy = hy - cr.y;
+  const dist = Math.hypot(dx, dy) || 1;
+
+  switch (cr.type) {
+    case 'meteor': {
+      // Diagonal streaks, slight home-seeking at close range
+      const spd = 2.5;
+      cr.vx += Math.cos(cr.angle) * 0.1;
+      cr.vy += Math.sin(cr.angle) * 0.1 + 0.02;
+      if (dist < 200) { cr.vx += (dx / dist) * 0.15; cr.vy += (dy / dist) * 0.15; }
+      const v = Math.hypot(cr.vx, cr.vy);
+      if (v > spd) { cr.vx = cr.vx / v * spd; cr.vy = cr.vy / v * spd; }
+      break; }
+    case 'spike': {
+      // Orbit then dart
+      const orbitR = 120 + 30 * Math.sin(cr.t * 0.02);
+      const orbitA = cr.phase + cr.t * 0.025;
+      const tx = hx + Math.cos(orbitA) * orbitR;
+      const ty = hy + Math.sin(orbitA) * orbitR;
+      const ex = tx - cr.x, ey = ty - cr.y;
+      cr.vx += ex * 0.06; cr.vy += ey * 0.06;
+      const v2 = Math.hypot(cr.vx, cr.vy);
+      if (v2 > 3) { cr.vx = cr.vx / v2 * 3; cr.vy = cr.vy / v2 * 3; }
+      break; }
+    case 'bolt': {
+      // Fast straight line toward worm then bounce off walls
+      if (cr.t % 120 === 0) { cr.angle = Math.atan2(dy, dx); }
+      cr.vx = Math.cos(cr.angle) * 3.5;
+      cr.vy = Math.sin(cr.angle) * 3.5;
+      if (cr.x < 0 || cr.x > W) cr.vx *= -1;
+      if (cr.y < 0 || cr.y > H) cr.vy *= -1;
+      break; }
+    case 'snake': {
+      // Sinusoidal patrol then lunge
+      cr.angle += 0.03;
+      const base = Math.atan2(dy, dx);
+      const wobble = Math.sin(cr.t * 0.05) * 1.2;
+      cr.vx = Math.cos(base + wobble) * 2;
+      cr.vy = Math.sin(base + wobble) * 2;
+      break; }
+    case 'wriggler': {
+      // S-curve approach
+      const ta = Math.atan2(dy, dx);
+      const s = Math.sin(cr.t * 0.08) * 0.9;
+      cr.vx += (Math.cos(ta + s) * 1.8 - cr.vx) * 0.12;
+      cr.vy += (Math.sin(ta + s) * 1.8 - cr.vy) * 0.12;
+      break; }
+    case 'pulsar': {
+      // Pulsating expand-contract, then snap toward worm
+      const pR = 90 + 50 * Math.sin(cr.t * 0.04);
+      const pA = cr.phase + cr.t * 0.02;
+      cr.x = hx + Math.cos(pA) * pR;
+      cr.y = hy + Math.sin(pA) * pR;
+      cr.vx = 0; cr.vy = 0;
+      return; } // direct position set
+    case 'hornet': {
+      // Aggressive homing with speed bursts
+      const spd2 = dist < 150 ? 4 : 2.2;
+      cr.vx += (dx / dist) * 0.3; cr.vy += (dy / dist) * 0.3;
+      const v3 = Math.hypot(cr.vx, cr.vy);
+      if (v3 > spd2) { cr.vx = cr.vx / v3 * spd2; cr.vy = cr.vy / v3 * spd2; }
+      break; }
+    case 'chaser': {
+      // Pure homing
+      cr.vx += (dx / dist) * 0.25; cr.vy += (dy / dist) * 0.25;
+      const v4 = Math.hypot(cr.vx, cr.vy);
+      if (v4 > 3) { cr.vx = cr.vx / v4 * 3; cr.vy = cr.vy / v4 * 3; }
+      break; }
+    case 'twin': {
+      // Mirror-pair patrol lines
+      cr.vx = Math.cos(cr.phase + cr.t * 0.015) * 2;
+      cr.vy = Math.sin(cr.t * 0.03) * 1.5;
+      break; }
+    case 'rusher': {
+      // Long windup then fast rush
+      const rush = cr.t % 180;
+      if (rush < 120) {
+        // Windup: slow circle
+        cr.vx = Math.cos(cr.phase + rush * 0.05) * 1;
+        cr.vy = Math.sin(cr.phase + rush * 0.05) * 1;
+      } else {
+        // Rush
+        cr.vx = (dx / dist) * 5; cr.vy = (dy / dist) * 5;
+      }
+      break; }
+    // Beneficial creatures — gentle movement, don't chase
+    case 'drifter': {
+      cr.vx = Math.cos(cr.phase + cr.t * 0.012) * 0.8;
+      cr.vy = Math.sin(cr.phase * 1.3 + cr.t * 0.009) * 0.8;
+      break; }
+    case 'orb': {
+      const oR = 55 + 20 * Math.sin(cr.t * 0.03);
+      cr.x = cr.x + (hx - 80 + Math.cos(cr.phase + cr.t * 0.018) * oR - cr.x) * 0.05;
+      cr.y = cr.y + (hy + Math.sin(cr.phase + cr.t * 0.018) * oR - cr.y) * 0.05;
+      return; }
+    case 'glider': {
+      cr.vx = Math.cos(cr.angle + cr.t * 0.008) * 1.2;
+      cr.vy = Math.sin(cr.phase + cr.t * 0.01) * 0.7;
+      break; }
+    case 'sparkle': {
+      cr.vx = Math.cos(cr.phase + cr.t * 0.02) * 1.5;
+      cr.vy = Math.sin(cr.t * 0.015) * 1.5;
+      break; }
+    case 'ring': {
+      const rA = cr.phase + cr.t * 0.016;
+      cr.x += (hx + Math.cos(rA) * 70 - cr.x) * 0.04;
+      cr.y += (hy + Math.sin(rA) * 70 - cr.y) * 0.04;
+      return; }
+    case 'wisp': {
+      cr.vx = Math.cos(cr.phase + cr.t * 0.011) * rand(0.5, 1.5);
+      cr.vy = Math.sin(cr.phase * 1.7 + cr.t * 0.014) * rand(0.5, 1.5);
+      break; }
+    case 'bubble': {
+      cr.vy -= 0.04;
+      const bv = Math.hypot(cr.vx, cr.vy);
+      if (bv > 1.8) { cr.vx = cr.vx / bv * 1.8; cr.vy = cr.vy / bv * 1.8; }
+      if (cr.y < 0) cr.y = H;
+      break; }
+  }
+  cr.x += cr.vx;
+  cr.y += cr.vy;
+}
+
+function _checkCnstCreatureCollision(cr, hx, hy) {
+  if (wInvincible > 0 || wSegs.length === 0) return;
+  const dist = Math.hypot(hx - cr.x, hy - cr.y);
+  if (dist > SEG_RADIUS + cr.r) return;
+
+  cr.state = 'fading';
+  cr.fadeAlpha = 1;
+
+  // Beneficial: collect
+  const def = CNST_DEFS[cr.cnstId];
+  if (!def) return;
+
+  if (def.type === 'beneficial') {
+    score += 25 * Math.round(cnstScoreMult); updateHUD();
+    triggerSnapEffect(hx, hy, '#f5e642', []);
+    sfx.pixelCommon && sfx.pixelCommon();
+    return;
+  }
+
+  if (def.type === 'wildcard') {
+    // 50/50
+    if (Math.random() < 0.5) {
+      score += 15; updateHUD();
+      triggerSnapEffect(hx, hy, '#00e5ff', []);
+    } else {
+      _cnstDamageWorm(hx, hy);
+    }
+    return;
+  }
+
+  // Harmful
+  _cnstDamageWorm(hx, hy);
+}
+
+function _cnstDamageWorm(hx, hy) {
+  const remove = Math.min(3, wSegs.length - 1);
+  if (remove > 0) wSegs.splice(wSegs.length - remove, remove);
+  wInvincible = 60;
+  triggerSnapEffect(hx, hy, '#ff2d78', []);
+  showToast('HIT!', 1200, '#ff2d78');
+  sfx.damage && sfx.damage();
+  if (wSegs.length <= 1) triggerDeath();
+}
+
+// ── Draw scrolling stars ──────────────────────────────────────────────────────
+function drawScrollingStars() {
+  for (const s of bgScrollStars) {
+    ctx.globalAlpha = s.alpha;
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ── Draw constellations ───────────────────────────────────────────────────────
+function drawConstellations() {
+  if (currentLevel !== 3) return;
+  for (const c of constellations) {
+    const def = c.def;
+    const ox = c.screenX, oy = c.screenY;
+    const alpha = c.opacity;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+
+    // Draw constellation lines (animated during waking)
+    const totalLines = def.lines.length;
+    const visLines = Math.ceil(c.lineProgress * totalLines);
+    ctx.strokeStyle = def.type === 'harmful' ? '#ff2d78'
+                    : def.type === 'beneficial' ? '#f5e642' : '#00e5ff';
+    ctx.lineWidth = 0.8;
+    ctx.shadowBlur = 6;
+    ctx.shadowColor = ctx.strokeStyle;
+    for (let li = 0; li < visLines; li++) {
+      const [a, b] = def.lines[li];
+      const sa = def.stars[a], sb = def.stars[b];
+      ctx.beginPath();
+      ctx.moveTo(ox + sa.x, oy + sa.y);
+      ctx.lineTo(ox + sb.x, oy + sb.y);
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    // Draw stars
+    const starColor = def.type === 'harmful' ? '#ff6b9d'
+                    : def.type === 'beneficial' ? '#ffe066' : '#66e5ff';
+    for (let si = 0; si < def.stars.length; si++) {
+      const s = def.stars[si];
+      const isHeart = si === def.heartStar;
+      ctx.fillStyle = isHeart ? '#ffffff' : starColor;
+      if (isHeart) {
+        // Pulsating heart star
+        const pulse = 1 + 0.25 * Math.sin(c.heartPulse);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = '#ffffff';
+        _drawHeart(ox + s.x, oy + s.y, 7 * pulse, '#ffffff');
+        ctx.restore();
+      } else {
+        const r = 2.5;
+        ctx.beginPath();
+        ctx.arc(ox + s.x, oy + s.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // State label (active only)
+    if (c.state === 'active' || c.state === 'waking') {
+      ctx.globalAlpha = alpha * 0.7;
+      ctx.font = '8px "Space Mono", monospace';
+      ctx.fillStyle = def.type === 'harmful' ? '#ff2d78'
+                    : def.type === 'beneficial' ? '#f5e642' : '#00e5ff';
+      ctx.textAlign = 'center';
+      ctx.fillText(c.id.toUpperCase(), ox, oy - 80);
+    }
+
+    ctx.restore();
+  }
+}
+
+function _drawHeart(cx, cy, size, color) {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + size * 0.3);
+  ctx.bezierCurveTo(cx, cy - size * 0.1, cx - size, cy - size * 0.1, cx - size * 0.7, cy - size * 0.5);
+  ctx.bezierCurveTo(cx - size * 0.35, cy - size, cx, cy - size * 0.5, cx, cy - size * 0.1);
+  ctx.bezierCurveTo(cx, cy - size * 0.5, cx + size * 0.35, cy - size, cx + size * 0.7, cy - size * 0.5);
+  ctx.bezierCurveTo(cx + size, cy - size * 0.1, cx, cy - size * 0.1, cx, cy + size * 0.3);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+// ── Draw constellation creatures ──────────────────────────────────────────────
+function drawCnstCreatures() {
+  if (currentLevel !== 3) return;
+  for (const cr of cnstCreatures) {
+    if (cr.state === 'dead') continue;
+    ctx.save();
+    ctx.globalAlpha = cr.state === 'fading' ? cr.fadeAlpha : 1;
+    ctx.translate(cr.x, cr.y);
+    _drawCreatureShape(cr);
+    ctx.restore();
+  }
+}
+
+function _drawCreatureShape(cr) {
+  switch (cr.type) {
+    case 'meteor': {
+      // Glowing streak
+      ctx.strokeStyle = '#ff6633'; ctx.lineWidth = 2; ctx.shadowBlur = 8; ctx.shadowColor = '#ff6633';
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-12 * Math.cos(cr.angle), -12 * Math.sin(cr.angle)); ctx.stroke();
+      ctx.fillStyle = '#ffaa66'; ctx.beginPath(); ctx.arc(0, 0, 3, 0, Math.PI * 2); ctx.fill();
+      break; }
+    case 'spike': {
+      ctx.strokeStyle = '#ff2d78'; ctx.lineWidth = 1.5; ctx.shadowBlur = 6; ctx.shadowColor = '#ff2d78';
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2 + cr.t * 0.05;
+        ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(Math.cos(a)*9, Math.sin(a)*9); ctx.stroke();
+      }
+      break; }
+    case 'bolt': {
+      ctx.strokeStyle = '#ffdd00'; ctx.lineWidth = 2; ctx.shadowBlur = 10; ctx.shadowColor = '#ffdd00';
+      ctx.beginPath();
+      ctx.moveTo(-4, -8); ctx.lineTo(2, -1); ctx.lineTo(-2, -1); ctx.lineTo(4, 8);
+      ctx.stroke();
+      break; }
+    case 'snake': {
+      ctx.strokeStyle = '#66ff66'; ctx.lineWidth = 2; ctx.shadowBlur = 5; ctx.shadowColor = '#66ff66';
+      ctx.beginPath();
+      for (let i = 0; i <= 8; i++) {
+        const sx = (i - 4) * 2.5;
+        const sy = Math.sin(cr.t * 0.1 + i * 0.8) * 5;
+        i === 0 ? ctx.moveTo(sx, sy) : ctx.lineTo(sx, sy);
+      }
+      ctx.stroke();
+      // Head dot
+      ctx.fillStyle = '#66ff66'; ctx.beginPath(); ctx.arc(10, 0, 3, 0, Math.PI * 2); ctx.fill();
+      break; }
+    case 'wriggler': {
+      ctx.strokeStyle = '#ff8800'; ctx.lineWidth = 2.5; ctx.shadowBlur = 6; ctx.shadowColor = '#ff8800';
+      ctx.beginPath();
+      for (let i = 0; i <= 10; i++) {
+        const wx = (i - 5) * 2;
+        const wy = Math.sin(cr.t * 0.08 + i * 0.6) * 6;
+        i === 0 ? ctx.moveTo(wx, wy) : ctx.lineTo(wx, wy);
+      }
+      ctx.stroke();
+      break; }
+    case 'pulsar': {
+      const pr = 5 + 3 * Math.sin(cr.t * 0.1);
+      ctx.strokeStyle = '#ff44aa'; ctx.lineWidth = 1.5; ctx.shadowBlur = 12; ctx.shadowColor = '#ff44aa';
+      ctx.beginPath(); ctx.arc(0, 0, pr, 0, Math.PI * 2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, pr * 0.4, 0, Math.PI * 2);
+      ctx.fillStyle = '#ff44aa'; ctx.fill();
+      break; }
+    case 'hornet': {
+      // Triangle body
+      ctx.fillStyle = '#ffcc00'; ctx.strokeStyle = '#ff6600'; ctx.lineWidth = 1;
+      ctx.shadowBlur = 5; ctx.shadowColor = '#ffcc00';
+      ctx.beginPath();
+      ctx.moveTo(7, 0); ctx.lineTo(-5, -5); ctx.lineTo(-5, 5); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      break; }
+    case 'chaser': {
+      ctx.fillStyle = '#ff2d78'; ctx.shadowBlur = 8; ctx.shadowColor = '#ff2d78';
+      const ca = Math.atan2(cr.vy, cr.vx);
+      ctx.rotate(ca);
+      ctx.beginPath(); ctx.moveTo(8,0); ctx.lineTo(-5,-4); ctx.lineTo(-3,0); ctx.lineTo(-5,4); ctx.closePath();
+      ctx.fill();
+      break; }
+    case 'twin': {
+      ctx.fillStyle = '#cc66ff'; ctx.shadowBlur = 6; ctx.shadowColor = '#cc66ff';
+      ctx.beginPath(); ctx.arc(-5, 0, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc( 5, 0, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#cc66ff'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(-5,0); ctx.lineTo(5,0); ctx.stroke();
+      break; }
+    case 'rusher': {
+      const rushPhase = cr.t % 180;
+      const clr = rushPhase >= 120 ? '#ff0000' : '#aa2233';
+      ctx.fillStyle = clr; ctx.shadowBlur = rushPhase >= 120 ? 14 : 4; ctx.shadowColor = clr;
+      ctx.beginPath(); ctx.moveTo(9,0); ctx.lineTo(-6,-5); ctx.lineTo(-6,5); ctx.closePath();
+      ctx.fill();
+      break; }
+    case 'drifter': {
+      const da = 0.3 * Math.sin(cr.t * 0.05);
+      ctx.strokeStyle = '#aaff88'; ctx.lineWidth = 1; ctx.shadowBlur = 5; ctx.shadowColor = '#aaff88';
+      ctx.beginPath(); ctx.arc(0, 0, 6 + da * 8, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = 'rgba(170,255,136,0.25)'; ctx.fill();
+      break; }
+    case 'orb': {
+      const og = ctx.createRadialGradient(0,0,1,0,0,8);
+      og.addColorStop(0,'#ffffff'); og.addColorStop(0.4,'#ffe066'); og.addColorStop(1,'rgba(255,224,102,0)');
+      ctx.fillStyle = og; ctx.shadowBlur = 10; ctx.shadowColor = '#ffe066';
+      ctx.beginPath(); ctx.arc(0,0,8,0,Math.PI*2); ctx.fill();
+      break; }
+    case 'glider': {
+      ctx.fillStyle = '#88ccff'; ctx.shadowBlur = 6; ctx.shadowColor = '#88ccff';
+      ctx.beginPath();
+      ctx.moveTo(0,-6); ctx.lineTo(8,4); ctx.lineTo(0,1); ctx.lineTo(-8,4); ctx.closePath();
+      ctx.fill();
+      break; }
+    case 'sparkle': {
+      ctx.strokeStyle = '#ffaaff'; ctx.lineWidth = 1.5; ctx.shadowBlur = 8; ctx.shadowColor = '#ffaaff';
+      for (let i = 0; i < 4; i++) {
+        const sa = (i / 4) * Math.PI * 2 + cr.t * 0.06;
+        ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(Math.cos(sa)*8, Math.sin(sa)*8); ctx.stroke();
+      }
+      break; }
+    case 'ring': {
+      const ringR = 7 + 2 * Math.sin(cr.t * 0.05);
+      ctx.strokeStyle = '#00ffcc'; ctx.lineWidth = 1.5; ctx.shadowBlur = 8; ctx.shadowColor = '#00ffcc';
+      ctx.beginPath(); ctx.arc(0,0,ringR,0,Math.PI*2); ctx.stroke();
+      break; }
+    case 'wisp': {
+      ctx.globalAlpha *= (0.5 + 0.5 * Math.sin(cr.t * 0.07));
+      ctx.fillStyle = '#aaeeff'; ctx.shadowBlur = 10; ctx.shadowColor = '#aaeeff';
+      ctx.beginPath(); ctx.arc(0,0,4,0,Math.PI*2); ctx.fill();
+      break; }
+    case 'bubble': {
+      const ba = 0.4 + 0.4 * Math.abs(Math.sin(cr.t * 0.04));
+      ctx.globalAlpha *= ba;
+      ctx.strokeStyle = '#99ddff'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(0,0,7,0,Math.PI*2); ctx.stroke();
+      break; }
+  }
+}
+
+// ── updateLevelHUD ────────────────────────────────────────────────────────────
+function updateLevelHUD() {
+  const el = document.getElementById('level-hud');
+  if (!gameStarted) { el.classList.remove('visible'); return; }
+  el.classList.add('visible');
+  document.getElementById('level-hud-num').textContent  = `LEVEL ${currentLevel}`;
+  document.getElementById('level-hud-name').textContent = LEVEL_DEFS[currentLevel - 1].name;
+}
+
 // ─── WORMHOLE ────────────────────────────────────────────────────────────────
-const WORMHOLE_TOUCH_R = 28;
+const WORMHOLE_TOUCH_R = 80;
 
 let wormhole          = null;
 let wormholeFlashAlpha = 0;
@@ -2566,10 +3551,16 @@ function initLevelThreats(n) {
   feeder = null; feederSpawnTimer = 0; seedParticles = [];
   feederArrow = null; feederFirstDone = false; feederPos = null;
   alienShips = [];
+  // Clear constellation state for all levels
+  constellations = []; cnstCreatures = []; bgScrollStars = [];
+  cnstScoreMult = 1; cnstScoreMultT = 0;
+  cnstPoisonSafe = false; cnstPoisonSafeT = 0; cnstRainbowT = 0;
+  cnstRetired = new Set(); cnstSpawnTimer = 0;
   if (n === 1) feederIntroShown = false;
   if (n === 1) initRobins();
   if (n >= 2)  initCompetitors();
   if (n === 2) initShips();    // Alien ships: Level 2 (THE BELT) only
+  if (n === 3) initConstellations();
   if (n === 5) initRobins();  // The Void: robins return alongside competitors
 }
 
@@ -3986,7 +4977,8 @@ function frame() {
     if (deathState === null && (currentLevel === 1 || currentLevel === 5)) { updateRobins(); updateFeeder(); }
     if (deathState === null && alienShips.length > 0) updateShips();
     if (deathState === null && currentLevel >= 2) updateCompetitors();
-    if (deathState === null && currentLevel >= 3) { updateBlackHole(); updateRedWorms(); }
+    if (deathState === null && currentLevel === 3) updateConstellations();
+    if (deathState === null && currentLevel >= 4) { updateBlackHole(); updateRedWorms(); }
   }
 
   // Wormhole exit animation runs even while the level banner is pausing the game,
@@ -4002,7 +4994,8 @@ function frame() {
   if (gameStarted) {
     drawPixels();
     drawWormholeSprite();
-    if (currentLevel >= 3) drawBlackHole();
+    if (currentLevel === 3) { drawConstellations(); drawCnstCreatures(); }
+    if (currentLevel >= 4) drawBlackHole();
     if (currentLevel === 1 || currentLevel === 5) drawSeedParticles();
     drawPoisonPixels();
     drawPoisonExplosions();
@@ -4010,7 +5003,7 @@ function frame() {
     if (currentLevel === 1 || currentLevel === 5) { drawFeeder(); drawRobins(); drawFeederArrow(); }
     if (alienShips.length > 0) drawShips();
     if (currentLevel >= 2) drawCompetitors();
-    if (currentLevel >= 3) drawRedWorms();
+    if (currentLevel >= 4) drawRedWorms();
     drawSnapEffects();  // always on top
   }
 
@@ -4038,6 +5031,7 @@ function frame() {
   }
 
   updateSpeedIndicator();
+  updateLevelHUD();
   requestAnimationFrame(frame);
 }
 
