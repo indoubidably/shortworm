@@ -1699,7 +1699,7 @@ function wormSnapAt(segIndex, hitRobin, noNewPoison = false) {
     triggerSnapEffect(bx, by, '#ff2d78', []);
     camShakeFrames = 10;
     sfx.snap();
-    loseLife();
+    handleDeath();
     if (hitRobin) robinNewHop(hitRobin);
     return;
   }
@@ -3208,7 +3208,7 @@ function _cnstDamageWorm(hx, hy) {
   triggerSnapEffect(hx, hy, '#ff2d78', []);
   showToast('HIT!', 1200, '#ff2d78');
   sfx.damage && sfx.damage();
-  if (wSegs.length <= 1) triggerDeath();
+  if (wSegs.length <= 1) handleDeath();
 }
 
 // ── Draw scrolling stars ──────────────────────────────────────────────────────
@@ -3616,9 +3616,56 @@ function checkLevelThreshold() {
   if (score >= LEVEL_DEFS[currentLevel - 1].threshold) spawnWormhole();
 }
 
-// ─── LOSE LIFE ───────────────────────────────────────────────────────────────
-function loseLife() {
+// ─── DEATH / RESPAWN PIPELINE ────────────────────────────────────────────────
+
+// Entry point for all lethal collisions.
+// Guards against re-entry; kicks off the visual death sequence.
+// The ghost animation calls loseLife() when it finishes.
+function handleDeath() {
+  if (deathState !== null) return;  // already dying or game-over — ignore
   triggerDeath();
+}
+
+// Called by updateDeath() when the fade animation completes.
+// Decrements lives and routes to respawn or game-over.
+function loseLife() {
+  lives = Math.max(0, lives - 1);
+  if (score > highScore) {
+    highScore = score;
+    localStorage.setItem('sw_hiscore', String(highScore));
+  }
+  updateHUD();
+
+  if (lives <= 0) {
+    sfx.gameOver();
+    deathState = 'game_over';
+    deathT     = 0;
+    gameOverT  = 0;
+    return;
+  }
+  respawn();
+}
+
+// Rebuilds the worm at centre, clears death state, resumes play.
+// Does NOT touch score, level, threats, or background.
+function respawn() {
+  wormhole           = null;
+  wormholeFlashAlpha = 0;
+  const banner = document.getElementById('level-banner');
+  if (banner) banner.style.display = 'none';
+  levelPaused    = false;
+  deathState     = null;
+  deathFadeAlpha = 0;
+  deathParticles = [];
+  const cx = W / 2, cy = H / 2;
+  wSegs = Array.from({ length: START_SEGS }, (_, i) => ({
+    x: cx - i * SEG_SPACING, y: cy,
+  }));
+  wDir     = { x: 1, y: 0 }; wTarget = { x: 1, y: 0 };
+  wStopped = false; wBoosting = false; wSlowing = false;
+  wGrow    = 0;
+  wInvincible = 220;
+  showToast('BACK IN ACTION', 2000, '#00e5ff');
 }
 
 // ─── COMPETITOR WORMS ────────────────────────────────────────────────────────
@@ -4217,40 +4264,7 @@ function updateDeath() {
   } else if (deathState === 'fade') {
     deathFadeAlpha = Math.min(1, deathT / 18);
     if (deathT >= 18) {
-      // Commit the death
-      lives--;
-      if (score > highScore) {
-        highScore = score;
-        localStorage.setItem('sw_hiscore', String(highScore));
-      }
-      updateHUD();
-
-      if (lives > 0) {
-        // Respawn
-        wormhole     = null;
-        wormholeFlashAlpha = 0;
-        const banner = document.getElementById('level-banner');
-        if (banner) banner.style.display = 'none';
-        levelPaused  = false;
-        deathState   = null;
-        deathFadeAlpha = 0;
-        deathParticles = [];
-        const cx = W / 2, cy = H / 2;
-        wSegs = Array.from({ length: START_SEGS }, (_, i) => ({
-          x: cx - i * SEG_SPACING, y: cy,
-        }));
-        wDir = { x: 1, y: 0 }; wTarget = { x: 1, y: 0 };
-        wStopped = false; wBoosting = false; wSlowing = false;
-        wGrow    = 0;
-        wInvincible = 220;
-        showToast('BACK IN ACTION', 2000, '#00e5ff');
-      } else {
-        // Game over
-        sfx.gameOver();
-        deathState = 'game_over';
-        deathT     = 0;
-        gameOverT  = 0;
-      }
+      loseLife();  // decrements lives, calls respawn() or triggers game_over
     }
 
   } else if (deathState === 'game_over') {
