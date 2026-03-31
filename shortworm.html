@@ -2579,7 +2579,7 @@ function repositionWormAtCenter() {
   // Spread in a line so segments aren't all stacked — chain propagation needs separation
   wSegs = Array.from({ length: keep }, (_, i) => ({ x: cx - i * SEG_SPACING, y: cy }));
   wDir = { x: 1, y: 0 }; wTarget = { x: 1, y: 0 };
-  wStopped = false; wBoosting = false; wSlowing = false; wGrow = 0; wInvincible = 90;
+  wStopped = false; wBoosting = false; wSlowing = false; wGrow = 0; wInvincible = 220;
 }
 
 function doLevelTransition() {
@@ -3987,6 +3987,14 @@ function frame() {
     if (deathState === null && alienShips.length > 0) updateShips();
     if (deathState === null && currentLevel >= 2) updateCompetitors();
     if (deathState === null && currentLevel >= 3) { updateBlackHole(); updateRedWorms(); }
+  }
+
+  // Wormhole exit animation runs even while the level banner is pausing the game,
+  // so the worm streams back out during the banner instead of being invisible.
+  if (gameStarted && levelPaused && wormhole && wormhole.phase === 'exit') {
+    wormhole.angle += 0.04; wormhole.pulse += 0.06; wormhole.blinkT++;
+    wormholeExitSegs = Math.min(wSegs.length, wormholeExitSegs + 4);
+    if (wormholeExitSegs >= wSegs.length && wormhole.blinkT >= 40) wormhole = null;
   }
 
   if (deathState !== null) updateDeath();
