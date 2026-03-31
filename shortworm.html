@@ -457,6 +457,11 @@
     border-color: #f5e642;
     box-shadow: 0 0 5px #f5e642, 0 0 12px rgba(245,230,66,0.5);
   }
+  .spd-bar.lit-pink {
+    background: #ff2d78;
+    border-color: #ff2d78;
+    box-shadow: 0 0 5px #ff2d78, 0 0 14px rgba(255,45,120,0.6);
+  }
 
   /* SOUND TOGGLE */
   #sound-btn {
@@ -570,6 +575,8 @@
 
 <!-- SPEED INDICATOR -->
 <div id="speed-indicator">
+  <div class="spd-bar" id="spd5"></div>
+  <div class="spd-bar" id="spd4"></div>
   <div class="spd-bar" id="spd3"></div>
   <div class="spd-bar" id="spd2"></div>
   <div class="spd-bar" id="spd1"></div>
@@ -819,21 +826,27 @@ function drawGlowWorms() {
 // ─── PLAYER WORM ─────────────────────────────────────────────────────────────
 const SEG_RADIUS  = 8;
 const SEG_SPACING = 16;
-const SPEED_SLOW  = 1.6;
-const SPEED_BASE  = 3.5;
-const SPEED_BOOST = 5.5;
-const LERP_DIR    = 0.09;
-const START_SEGS  = 12;
+const SPEED_SLOW        = 1.6;   // slow-crawl speed, constant across levels
+const LERP_DIR          = 0.09;
+const START_SEGS        = 12;
+// Level-indexed base and boost cap speeds (index 0 = unused, 1–5 = levels)
+const SPEED_BASE_LEVELS  = [0, 2.8, 3.6, 4.2, 4.8, 5.4];
+const SPEED_BOOST_LEVELS = [0, 5.0, 6.2, 7.2, 8.0, 9.0];
+function levelBaseSpeed()  { return SPEED_BASE_LEVELS[currentLevel]  ?? 3.5; }
+function levelBoostCap()   { return SPEED_BOOST_LEVELS[currentLevel] ?? 5.5; }
 
-let wSegs       = [];   // [{x, y}, ...]  index 0 = head
-let wDir        = { x: 1, y: 0 };
-let wTarget     = { x: 1, y: 0 };
-let wStopped    = false;
-let wBoosting   = false;
-let wSlowing    = false;
-let wGrow       = 0;
-let wInvincible = 0;
-let wFrame      = 0;    // frame counter for flash timing
+let wSegs          = [];   // [{x, y}, ...]  index 0 = head
+let wDir           = { x: 1, y: 0 };
+let wTarget        = { x: 1, y: 0 };
+let wStopped       = false;
+let wBoosting      = false;
+let wSlowing       = false;
+let wGrow          = 0;
+let wInvincible    = 0;
+let wFrame         = 0;     // frame counter for flash timing
+let wBoostMomentum = 0;     // extra speed built while boosting (0 → boostCap-base)
+let wSpeedBurst    = 0;     // additive bonus from pixel collection
+let wSpeedBurstT   = 0;     // frames remaining on burst
 
 function initWorm() {
   wSegs = [];
@@ -849,6 +862,9 @@ function initWorm() {
   wGrow       = 0;
   wInvincible = 0;
   wFrame      = 0;
+  wBoostMomentum = 0;
+  wSpeedBurst    = 0;
+  wSpeedBurstT   = 0;
 }
 
 function updateWorm() {
@@ -862,14 +878,31 @@ function updateWorm() {
   const dlen = Math.hypot(wDir.x, wDir.y);
   if (dlen > 0) { wDir.x /= dlen; wDir.y /= dlen; }
 
+  // Momentum: ramp up while boosting, decay when not
+  const boostMax = levelBoostCap() - levelBaseSpeed();
+  if (wBoosting && !wStopped) {
+    wBoostMomentum = Math.min(boostMax, wBoostMomentum + 0.15);
+  } else {
+    wBoostMomentum = Math.max(0, wBoostMomentum - boostMax / 30);
+  }
+  // Burst countdown
+  if (wSpeedBurstT > 0) { wSpeedBurstT--; }
+  else                   { wSpeedBurst = 0; }
+
   if (!wStopped) {
-    const speed = bhPulling
-      ? bhPullSpd
-      : (wormhole && wormhole.phase === 'eating')
-        ? wormholeEnterSpd
-        : wBoosting ? SPEED_BOOST
-        : wSlowing  ? SPEED_SLOW
-        : SPEED_BASE;
+    let speed;
+    if (bhPulling) {
+      speed = bhPullSpd;
+    } else if (wormhole && wormhole.phase === 'eating') {
+      speed = wormholeEnterSpd;
+    } else if (wSlowing) {
+      speed = SPEED_SLOW;
+    } else {
+      const base  = levelBaseSpeed();
+      const boost = Math.min(wBoostMomentum, boostMax);
+      const burst = Math.min(wSpeedBurst, base);
+      speed = Math.min(Math.max(levelBoostCap(), base * 2), base + boost + burst);
+    }
     const head  = wSegs[0];
 
     // Move head — raw coords, no clamping; wrap applied at draw time
@@ -1054,6 +1087,12 @@ function updatePixels() {
 
       if (p.type.name === 'giga') showToast('GIGA PIXEL!');
       checkLevelThreshold();
+
+      // Speed burst on collection
+      if      (p.type.name === 'giga')   { wSpeedBurst = Math.max(wSpeedBurst, 1.2); wSpeedBurstT = 50; }
+      else if (p.type.name === 'mega')   { wSpeedBurst = Math.max(wSpeedBurst, 0.8); wSpeedBurstT = Math.max(wSpeedBurstT, 35); }
+      else if (p.type.name === 'byte')   { wSpeedBurst = Math.max(wSpeedBurst, 0.5); wSpeedBurstT = Math.max(wSpeedBurstT, 25); }
+      else                               { wSpeedBurst = Math.max(wSpeedBurst, 0.3); wSpeedBurstT = Math.max(wSpeedBurstT, 20); }
 
       pixels.splice(i, 1);
       spawnPixel();
@@ -2432,7 +2471,7 @@ let wormhole          = null;
 let wormholeFlashAlpha = 0;
 let wormholeSegsEaten  = 0;
 let wormholeExitSegs   = 0;
-let wormholeEnterSpd   = SPEED_BASE;
+let wormholeEnterSpd   = 3.5; // set to levelBaseSpeed() on enter
 
 function spawnWormhole() {
   if (!wSegs.length) return;
@@ -2444,7 +2483,7 @@ function spawnWormhole() {
   wormhole = { x, y, vx: rand(-0.5,0.5), vy: rand(-0.5,0.5),
     angle: 0, pulse: 0, blinkT: 0, phase: 'active' };
   wormholeSegsEaten = 0; wormholeFlashAlpha = 0;
-  wormholeExitSegs  = 0; wormholeEnterSpd  = SPEED_BASE;
+  wormholeExitSegs  = 0; wormholeEnterSpd  = levelBaseSpeed();
   sfx.wormholeOpen();
 }
 
@@ -2460,7 +2499,7 @@ function updateWormhole() {
     const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
     if (Math.hypot(hx - wh.x, hy - wh.y) < WORMHOLE_TOUCH_R) {
       wh.phase = 'eating'; wormholeSegsEaten = 0;
-      wormholeEnterSpd = wBoosting ? SPEED_BOOST : wSlowing ? SPEED_SLOW : SPEED_BASE;
+      wormholeEnterSpd = wSlowing ? SPEED_SLOW : levelBaseSpeed() + Math.min(wBoostMomentum, levelBoostCap() - levelBaseSpeed());
       sfx.wormholeEnter();
     }
   }
@@ -2521,7 +2560,7 @@ function initLevelThreats(n) {
   robins = []; robinSpawnTimer = 0;
   competitors = []; compRespawnTimers = [];
   blackHole = null; bhSpawnCounter = 0; bhPulling = false;
-  bhSegsEaten = 0; bhPullSpd = SPEED_BASE; redWorms = [];
+  bhSegsEaten = 0; bhPullSpd = levelBaseSpeed(); redWorms = [];
   poisonPixels = []; poisonExplosions = []; snapEffects = []; camShakeFrames = 0;
   // Feeder resets per level; intro toast only resets for full new game (n===1)
   feeder = null; feederSpawnTimer = 0; seedParticles = [];
@@ -2548,7 +2587,7 @@ function doLevelTransition() {
   robins = []; robinSpawnTimer = 0;
   competitors = []; compRespawnTimers = [];
   blackHole = null; bhPulling = false; bhSegsEaten = 0;
-  bhPullSpd = SPEED_BASE; bhSpawnCounter = 0; redWorms = [];
+  bhPullSpd = levelBaseSpeed(); bhSpawnCounter = 0; redWorms = [];
   alienShips = []; poisonExplosions = [];
   currentLevel = next;
   initLevelBackground(currentLevel);
@@ -2755,7 +2794,7 @@ let blackHole        = null;  // { x, y, angle, t, lifetime, pulling, angle2, an
 let bhSpawnCounter   = 0;
 let bhInvertAlpha    = 0;     // 0–1 for screen-invert flash
 let bhSegsEaten      = 0;     // segments streamed in during pull
-let bhPullSpd        = SPEED_BASE;
+let bhPullSpd        = 3.5; // set to levelBaseSpeed() on spawn
 let bhPulling        = false; // true while worm is being sucked in
 let redWorms         = [];    // array of red worm objects
 
@@ -2832,7 +2871,7 @@ function updateBlackHole() {
       }
       blackHole  = null;
       bhPulling  = false;
-      bhPullSpd  = SPEED_BASE;
+      bhPullSpd  = levelBaseSpeed();
       bhSegsEaten = 0;
       // Re-emerge worm at opposite side
       const ex = ox, ey = oy;
@@ -2877,7 +2916,7 @@ function updateBlackHole() {
   if (torusDist(hx2, hy2, bhx, bhy) < BH_PULL_R && wInvincible === 0) {
     bhPulling   = true;
     bhSegsEaten = 0;
-    bhPullSpd   = SPEED_BASE;
+    bhPullSpd   = levelBaseSpeed();
     sfx.blackHole();
   }
 }
@@ -3880,36 +3919,45 @@ const sfx = {
 
 // ─── SPEED INDICATOR ─────────────────────────────────────────────────────────
 const spdIndicator = document.getElementById('speed-indicator');
-const spdBar1 = document.getElementById('spd1');
-const spdBar2 = document.getElementById('spd2');
-const spdBar3 = document.getElementById('spd3');
+const spdBars = [1,2,3,4,5].map(i => document.getElementById('spd' + i));
 
 function updateSpeedIndicator() {
   if (!gameStarted) { spdIndicator.classList.remove('visible'); return; }
   spdIndicator.classList.add('visible');
 
-  // Determine current speed state
-  let state; // 'slow' | 'normal' | 'boost'
-  if      (wStopped)  state = 'stop';
-  else if (wBoosting) state = 'boost';
-  else if (wSlowing)  state = 'slow';
-  else                state = 'normal';
-
-  spdBar1.className = 'spd-bar';
-  spdBar2.className = 'spd-bar';
-  spdBar3.className = 'spd-bar';
-
-  if (state === 'slow') {
-    spdBar1.classList.add('lit-cyan');
-  } else if (state === 'normal') {
-    spdBar1.classList.add('lit-cyan');
-    spdBar2.classList.add('lit-cyan');
-  } else if (state === 'boost') {
-    spdBar1.classList.add('lit-yellow');
-    spdBar2.classList.add('lit-yellow');
-    spdBar3.classList.add('lit-yellow');
+  // Compute a 0–1 normalized speed value across the level's range
+  // 0 = slow/stopped, 0.4 = base, 1 = boost cap
+  let norm;
+  if (wStopped) {
+    norm = 0;
+  } else {
+    const base  = levelBaseSpeed();
+    const cap   = levelBoostCap();
+    const burst = Math.min(wSpeedBurst, base);
+    const boostM = Math.min(wBoostMomentum, cap - base);
+    const current = wSlowing ? SPEED_SLOW : base + boostM + burst;
+    // Map SPEED_SLOW→base as 0→0.4, base→cap as 0.4→1
+    if (current <= SPEED_SLOW) {
+      norm = 0;
+    } else if (current <= base) {
+      norm = 0.4 * (current - SPEED_SLOW) / Math.max(0.01, base - SPEED_SLOW);
+    } else {
+      norm = 0.4 + 0.6 * Math.min(1, (current - base) / Math.max(0.01, cap - base));
+    }
   }
-  // 'stop': all bars dim
+
+  // How many bars lit (1–5), 0 if stopped
+  const lit = wStopped ? 0 : Math.max(1, Math.round(norm * 5));
+
+  spdBars.forEach((bar, i) => {
+    bar.className = 'spd-bar';
+    if (i >= lit) return; // dim
+    const barNum = i + 1;
+    if (barNum <= 1)      bar.classList.add('lit-cyan');   // bar 1: dark cyan
+    else if (barNum <= 3) bar.classList.add('lit-cyan');   // bars 2–3: cyan
+    else if (barNum <= 4) bar.classList.add('lit-yellow'); // bar 4: yellow
+    else                  bar.classList.add('lit-pink');   // bar 5: pink
+  });
 }
 
 // ─── MAIN LOOP ───────────────────────────────────────────────────────────────
