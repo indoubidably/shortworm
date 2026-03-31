@@ -572,6 +572,91 @@
     letter-spacing: 0.08em;
     text-shadow: 0 0 20px #f5e642, 0 0 50px rgba(245,230,66,0.5), 0 0 90px rgba(245,230,66,0.2);
   }
+
+  /* ENERGY BAR */
+  #energy-hud {
+    position: fixed;
+    top: 58px;
+    right: 16px;
+    pointer-events: none;
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  #energy-hud.visible { opacity: 1; }
+  #energy-label {
+    font-size: 8px;
+    font-weight: 400;
+    letter-spacing: 0.12em;
+    color: #8a9099;
+    text-align: right;
+    margin-bottom: 3px;
+    font-family: "Space Mono", monospace;
+    text-transform: uppercase;
+  }
+  #energy-bar-wrap {
+    width: 180px;
+    height: 10px;
+    border: 1px solid rgba(0,229,255,0.25);
+    border-radius: 5px;
+    background: rgba(0,0,0,0.4);
+    overflow: hidden;
+    position: relative;
+  }
+  #energy-bar-fill {
+    height: 100%;
+    width: 100%;
+    border-radius: 5px;
+    background: #00e5ff;
+    transition: background 0.3s;
+    box-sizing: border-box;
+  }
+  /* DANGER VIGNETTE */
+  #danger-vignette {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    background: radial-gradient(ellipse at center, transparent 58%, rgba(255,0,0,0.14) 100%);
+    opacity: 0;
+    transition: opacity 0.6s;
+  }
+  #danger-vignette.active { opacity: 1; }
+  /* PILL BOOST HUD */
+  #pill-boost-hud {
+    position: fixed;
+    top: 58px;
+    left: 16px;
+    pointer-events: none;
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.25s;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    align-items: flex-start;
+  }
+  #pill-boost-hud.visible { opacity: 1; }
+  #pill-boost-label {
+    font-size: 7px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    font-family: "Space Mono", monospace;
+    color: #00e5ff;
+    text-shadow: 0 0 8px #00e5ff;
+  }
+  #pill-boost-bar-wrap {
+    width: 70px; height: 4px;
+    border: 1px solid rgba(0,229,255,0.3);
+    border-radius: 2px;
+    background: rgba(0,0,0,0.4);
+    overflow: hidden;
+  }
+  #pill-boost-bar-fill {
+    height: 100%; width: 100%;
+    background: linear-gradient(90deg, #00e5ff, #ff2d78);
+    border-radius: 2px;
+  }
 </style>
 </head>
 <body>
@@ -600,6 +685,25 @@
 <div id="level-hud">
   <div id="level-hud-num">LEVEL 1</div>
   <div id="level-hud-name">DEEP SPACE</div>
+</div>
+
+<!-- ENERGY BAR -->
+<div id="energy-hud">
+  <div id="energy-label">Energy</div>
+  <div id="energy-bar-wrap">
+    <div id="energy-bar-fill"></div>
+  </div>
+</div>
+
+<!-- DANGER VIGNETTE (behind canvas) -->
+<div id="danger-vignette"></div>
+
+<!-- PILL BOOST INDICATOR -->
+<div id="pill-boost-hud">
+  <div id="pill-boost-label">⚡ SPD</div>
+  <div id="pill-boost-bar-wrap">
+    <div id="pill-boost-bar-fill"></div>
+  </div>
 </div>
 
 <!-- CONTROLS HINT (always visible) -->
@@ -884,6 +988,8 @@ let wFrame         = 0;     // frame counter for flash timing
 let wBoostMomentum = 0;     // extra speed built while boosting (0 → boostCap-base)
 let wSpeedBurst    = 0;     // additive bonus from pixel collection
 let wSpeedBurstT   = 0;     // frames remaining on burst
+let wPillBoost     = 0;     // flat speed bonus from speed pill (px/frame)
+let wPillBoostT    = 0;     // frames remaining on pill boost
 
 function initWorm() {
   wSegs = [];
@@ -902,6 +1008,8 @@ function initWorm() {
   wBoostMomentum = 0;
   wSpeedBurst    = 0;
   wSpeedBurstT   = 0;
+  wPillBoost     = 0;
+  wPillBoostT    = 0;
 }
 
 function updateWorm() {
@@ -925,6 +1033,9 @@ function updateWorm() {
   // Burst countdown
   if (wSpeedBurstT > 0) { wSpeedBurstT--; }
   else                   { wSpeedBurst = 0; }
+  // Pill boost countdown
+  if (wPillBoostT > 0) { wPillBoostT--; }
+  else                  { wPillBoost = 0; }
 
   if (!wStopped) {
     let speed;
@@ -939,6 +1050,7 @@ function updateWorm() {
       const boost = Math.min(wBoostMomentum, boostMax);
       const burst = Math.min(wSpeedBurst, base);
       speed = Math.min(Math.max(levelBoostCap(), base * 2), base + boost + burst);
+      speed += wPillBoost;  // pill bypasses normal cap
     }
     const head  = wSegs[0];
 
@@ -973,6 +1085,23 @@ function updateWorm() {
 
   // Invincibility countdown
   if (wInvincible > 0) wInvincible--;
+
+  // Energy: track personal best, smooth drop animation, death/critical checks
+  if (wSegs.length > energyMaxSegs) energyMaxSegs = wSegs.length;
+  if (wSegs.length > energyBarDisplay) {
+    energyBarDisplay = wSegs.length;  // instant rise
+    energyBarFlash   = 8;
+  } else {
+    energyBarDisplay = Math.max(wSegs.length, energyBarDisplay - (energyBarDisplay - wSegs.length) / 12);
+  }
+
+  if (wSegs.length <= 4 && !energyCriticalAlerted && deathState === null) {
+    energyCriticalAlerted = true;
+    showToast('CRITICAL — FIND ENERGY!', 2000, '#ff2200');
+  }
+  if (wSegs.length > 4) energyCriticalAlerted = false;
+
+  if (wSegs.length <= 2 && deathState === null) handleDeath();
 }
 
 function drawWorm() {
@@ -1126,7 +1255,7 @@ function updatePixels() {
       checkLevelThreshold();
 
       // Speed burst on collection
-      if      (p.type.name === 'giga')   { wSpeedBurst = Math.max(wSpeedBurst, 1.2); wSpeedBurstT = 50; }
+      if      (p.type.name === 'giga')   { wSpeedBurst = Math.max(wSpeedBurst, 3.5); wSpeedBurstT = 240; showToast('SUPER SPEED!', 1800, '#ff2d78'); }
       else if (p.type.name === 'mega')   { wSpeedBurst = Math.max(wSpeedBurst, 0.8); wSpeedBurstT = Math.max(wSpeedBurstT, 35); }
       else if (p.type.name === 'byte')   { wSpeedBurst = Math.max(wSpeedBurst, 0.5); wSpeedBurstT = Math.max(wSpeedBurstT, 25); }
       else                               { wSpeedBurst = Math.max(wSpeedBurst, 0.3); wSpeedBurstT = Math.max(wSpeedBurstT, 20); }
@@ -1512,9 +1641,11 @@ function updateFeeder() {
   }
   if (feeder) {
     feeder.pulse += 0.07;
-    // Collection check
-    const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
-    if (torusDist(hx, hy, feeder.x, feeder.y) < FEEDER_COLLECT_R) collectFeeder();
+    // Collection check — guard against wSegs being cleared by a death triggered earlier this frame
+    if (wSegs.length > 0) {
+      const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
+      if (torusDist(hx, hy, feeder.x, feeder.y) < FEEDER_COLLECT_R) collectFeeder();
+    }
   }
   // Seed particles
   for (let i = seedParticles.length - 1; i >= 0; i--) {
@@ -1691,18 +1822,8 @@ function wormSnapAt(segIndex, hitRobin, noNewPoison = false) {
   const bSeg   = wSegs[Math.min(keepTo - 1, wSegs.length - 1)];
   const bx = wrapX(bSeg.x), by = wrapY(bSeg.y);
 
-  // Zone: >15 cyan (+3 bonus), 8–15 yellow, <8 red (death)
+  // Zone color: >15 cyan (+3 bonus), 8–15 yellow, <8 red (critical)
   const zoneColor = n > 15 ? '#00e5ff' : n >= 8 ? '#f5e642' : '#ff2d78';
-
-  if (n < 8) {
-    // Death zone — flash red, lose life, no segment detach
-    triggerSnapEffect(bx, by, '#ff2d78', []);
-    camShakeFrames = 10;
-    sfx.snap();
-    handleDeath();
-    if (hitRobin) robinNewHop(hitRobin);
-    return;
-  }
 
   // Detach tail from segIndex onward
   const detached = wSegs.splice(keepTo);
@@ -1729,6 +1850,9 @@ function wormSnapAt(segIndex, hitRobin, noNewPoison = false) {
 
   if (n > 15) { score += 3; updateHUD(); }
   if (hitRobin) robinNewHop(hitRobin);
+
+  // New death threshold: 2 segments remaining = dead
+  if (wSegs.length <= 2) handleDeath();
 }
 
 /* ── update snap effects ── */
@@ -1888,6 +2012,7 @@ function updatePoisonPixels() {
         }
         showToast('POISONED!', 1800, '#aaff00');
         sfx.damage();
+        if (wSegs.length <= 2 && deathState === null) handleDeath();
         break;
       }
     }
@@ -3208,7 +3333,7 @@ function _cnstDamageWorm(hx, hy) {
   triggerSnapEffect(hx, hy, '#ff2d78', []);
   showToast('HIT!', 1200, '#ff2d78');
   sfx.damage && sfx.damage();
-  if (wSegs.length <= 1) handleDeath();
+  if (wSegs.length <= 2) handleDeath();
 }
 
 // ── Draw scrolling stars ──────────────────────────────────────────────────────
@@ -3551,6 +3676,10 @@ function initLevelThreats(n) {
   feeder = null; feederSpawnTimer = 0; seedParticles = [];
   feederArrow = null; feederFirstDone = false; feederPos = null;
   alienShips = [];
+  // Clear orbs, pill, particles on level transition
+  smallOrb = null; largeOrb = null; speedPill = null;
+  smallOrbTimer = 0; largeOrbTimer = 0; speedPillTimer = 0;
+  orbParticles = []; floatingTexts = []; screenFlashT = 0;
   // Clear constellation state for all levels
   constellations = []; cnstCreatures = []; bgScrollStars = [];
   cnstScoreMult = 1; cnstScoreMultT = 0;
@@ -3664,7 +3793,12 @@ function respawn() {
   wDir     = { x: 1, y: 0 }; wTarget = { x: 1, y: 0 };
   wStopped = false; wBoosting = false; wSlowing = false;
   wGrow    = 0;
+  wPillBoost = 0; wPillBoostT = 0;
   wInvincible = 220;
+  energyMaxSegs = Math.max(12, wSegs.length);
+  energyBarDisplay = wSegs.length;
+  energyBarFlash = 0;
+  energyCriticalAlerted = false;
   showToast('BACK IN ACTION', 2000, '#00e5ff');
 }
 
@@ -3884,7 +4018,7 @@ function updateBlackHole() {
   if (bhPulling) {
     bhPullSpd = Math.min(14, bhPullSpd + 0.3);
     // Force worm direction toward black hole (raw coords)
-    if (blackHole) {
+    if (blackHole && wSegs.length > 0) {
       const { dx, dy } = torusDelta(wSegs[0].x, wSegs[0].y, blackHole.x, blackHole.y);
       const d = Math.hypot(dx, dy);
       if (d > 0) { wTarget.x = dx / d; wTarget.y = dy / d; }
@@ -3961,6 +4095,9 @@ function updateBlackHole() {
 
 function updateRedWorms() {
   if (!gameStarted || levelPaused) return;
+  // Guard: wSegs may have been cleared by handleDeath() earlier this frame
+  // (updateBlackHole and updateRedWorms share the same if-block in frame())
+  if (wSegs.length === 0) return;
 
   const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
   const n  = wSegs.length;
@@ -4132,6 +4269,395 @@ function showToast(msg, duration = 1800, color = null) {
     toastEl.classList.remove('visible');
     toastTimer = null;
   }, duration);
+}
+
+// ─── ORB COLOR CYCLE ─────────────────────────────────────────────────────────
+const ORB_COLORS = ['#00e5ff','#0066ff','#9900ff','#ff2d78','#ff6b2b','#f5e642'];
+function orbCycleColor(t) {
+  const n = ORB_COLORS.length;
+  const s = (((t % 1) + 1) % 1) * n;
+  const lo = Math.floor(s), hi = (lo + 1) % n, f = s - lo;
+  const ph = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)];
+  const [ar,ag,ab] = ph(ORB_COLORS[lo]), [br,bg,bb] = ph(ORB_COLORS[hi]);
+  return `rgb(${Math.round(ar+(br-ar)*f)},${Math.round(ag+(bg-ag)*f)},${Math.round(ab+(bb-ab)*f)})`;
+}
+
+// ─── ENERGY BAR ──────────────────────────────────────────────────────────────
+let energyMaxSegs         = 12;
+let energyBarDisplay      = 12;   // animated display value (float)
+let energyBarFlash        = 0;    // bright edge flash frames on gain
+let energyCriticalAlerted = false;
+let energyPulseT          = 0;
+
+const _energyHudEl = document.getElementById('energy-hud');
+const _energyBarEl = document.getElementById('energy-bar-fill');
+const _dangerVigEl = document.getElementById('danger-vignette');
+const _pillHudEl   = document.getElementById('pill-boost-hud');
+const _pillBarEl   = document.getElementById('pill-boost-bar-fill');
+
+function updateEnergyBar() {
+  if (!gameStarted) {
+    _energyHudEl.classList.remove('visible');
+    _dangerVigEl.classList.remove('active');
+    _pillHudEl.classList.remove('visible');
+    return;
+  }
+  _energyHudEl.classList.add('visible');
+  energyPulseT++;
+
+  const maxL   = Math.max(energyMaxSegs, 12);
+  const ratio  = Math.min(1, Math.max(0, energyBarDisplay / maxL));
+  const fillPx = ratio * 180;
+
+  let fillCol, glowRgb;
+  if      (ratio > 0.75) { fillCol = '#00e5ff'; glowRgb = '0,229,255'; }
+  else if (ratio > 0.5)  { fillCol = '#f5e642'; glowRgb = '245,230,66'; }
+  else if (ratio > 0.25) { fillCol = '#ff6b2b'; glowRgb = '255,107,43'; }
+  else                   { fillCol = '#ff2200'; glowRgb = '255,34,0'; }
+
+  let blur = 4;
+  if (ratio <= 0.25) {
+    const pulse = Math.abs(Math.sin(energyPulseT * (wSegs.length <= 4 ? 0.4 : 0.15)));
+    blur = 8 + 10 * pulse;
+  }
+
+  const glow = energyBarFlash > 0
+    ? `0 0 20px #ffffff, 0 0 8px rgba(${glowRgb},0.9)`
+    : `0 0 ${Math.round(blur)}px rgba(${glowRgb},0.8)`;
+  if (energyBarFlash > 0) energyBarFlash--;
+
+  _energyBarEl.style.width     = Math.max(0, fillPx) + 'px';
+  _energyBarEl.style.background = fillCol;
+  _energyBarEl.style.boxShadow  = glow;
+
+  if (ratio <= 0.25 && deathState === null && gameStarted) {
+    _dangerVigEl.classList.add('active');
+  } else {
+    _dangerVigEl.classList.remove('active');
+  }
+
+  // Pill boost HUD
+  if (wPillBoostT > 0) {
+    _pillHudEl.classList.add('visible');
+    _pillBarEl.style.width = (wPillBoostT / 240 * 100) + '%';
+  } else {
+    _pillHudEl.classList.remove('visible');
+  }
+}
+
+// ─── POWER ORBS ──────────────────────────────────────────────────────────────
+let smallOrb      = null;
+let smallOrbTimer = 0;
+const SMALL_ORB_INTERVAL = 280;
+const SMALL_ORB_LIFE     = 600;
+
+let largeOrb      = null;
+let largeOrbTimer = 0;
+const LARGE_ORB_INTERVAL = 900;
+const LARGE_ORB_LIFE     = 480;
+
+let orbParticles  = [];
+let floatingTexts = [];
+let screenFlashT  = 0;
+
+function spawnSmallOrb() {
+  if (smallOrb || largeOrb) return;
+  smallOrb = {
+    x: rand(60, W - 60), y: rand(60, H - 60),
+    vx: (Math.random() - 0.5) * 0.8, vy: (Math.random() - 0.5) * 0.8,
+    t: 0, life: SMALL_ORB_LIFE,
+    spawningT: 15, despawning: false, despawnT: 0,
+  };
+}
+
+function updateSmallOrb() {
+  if (!smallOrb) {
+    if (!largeOrb) { smallOrbTimer++; if (smallOrbTimer >= SMALL_ORB_INTERVAL) { smallOrbTimer = 0; spawnSmallOrb(); } }
+    return;
+  }
+  const o = smallOrb;
+  o.t++;
+  if (o.spawningT > 0) o.spawningT--;
+
+  if (o.despawning) {
+    o.despawnT++;
+    if (o.despawnT >= 20) { smallOrb = null; }
+    return;
+  }
+
+  o.x += o.vx; o.y += o.vy;
+  if (o.x < 60) { o.x = 60; o.vx *= -1; }
+  if (o.x > W - 60) { o.x = W - 60; o.vx *= -1; }
+  if (o.y < 60) { o.y = 60; o.vy *= -1; }
+  if (o.y > H - 60) { o.y = H - 60; o.vy *= -1; }
+
+  o.life--;
+  if (o.life <= 0) { o.despawning = true; return; }
+
+  if (wSegs.length > 0 && deathState === null) {
+    const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
+    if (Math.hypot(hx - o.x, hy - o.y) < SEG_RADIUS + 42) {
+      _collectSmallOrb(o.x, o.y);
+      smallOrb = null;
+    }
+  }
+}
+
+function _collectSmallOrb(ox, oy) {
+  wGrow += 5;
+  energyBarFlash = 15;
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2 + Math.random() * 0.3;
+    const spd = rand(1.5, 4.0);
+    orbParticles.push({ x: ox, y: oy, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, alpha: 1, col: ORB_COLORS[i % ORB_COLORS.length], r: rand(2, 4) });
+  }
+  floatingTexts.push({ x: ox, y: oy - 10, vy: -0.8, text: '+5 ENERGY', col: '#00e5ff', alpha: 1, size: 16, t: 0, rainbow: false });
+  sfx.orbSmall();
+  showToast('ENERGY RESTORED', 1800, '#00e5ff');
+  smallOrbTimer = 0;
+}
+
+function spawnLargeOrb() {
+  if (largeOrb) return;
+  if (smallOrb) { smallOrb.despawning = true; }
+  largeOrb = {
+    x: rand(80, W - 80), y: rand(80, H - 80),
+    t: 0, life: LARGE_ORB_LIFE, rings: [],
+    spawningT: 15, despawning: false, despawnT: 0,
+  };
+}
+
+function updateLargeOrb() {
+  if (!largeOrb) {
+    largeOrbTimer++;
+    if (largeOrbTimer >= LARGE_ORB_INTERVAL && !smallOrb) { largeOrbTimer = 0; spawnLargeOrb(); }
+    return;
+  }
+  const o = largeOrb;
+  o.t++;
+  if (o.spawningT > 0) o.spawningT--;
+
+  if (o.t % 60 === 0 && !o.despawning) o.rings.push({ r: 18, alpha: 0.7 });
+  for (let i = o.rings.length - 1; i >= 0; i--) {
+    o.rings[i].r += 0.45; o.rings[i].alpha -= 0.012;
+    if (o.rings[i].alpha <= 0) o.rings.splice(i, 1);
+  }
+
+  if (o.despawning) {
+    o.despawnT++;
+    if (o.despawnT >= 20) { largeOrb = null; }
+    return;
+  }
+
+  o.life--;
+  if (o.life <= 0) { o.despawning = true; return; }
+
+  if (wSegs.length > 0 && deathState === null) {
+    const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
+    if (Math.hypot(hx - o.x, hy - o.y) < SEG_RADIUS + 52) {
+      _collectLargeOrb(o.x, o.y);
+      largeOrb = null;
+    }
+  }
+}
+
+function _collectLargeOrb(ox, oy) {
+  if (wSegs.length > 12) {
+    wSegs = wSegs.slice(0, 12);
+  } else {
+    while (wSegs.length < 12) wSegs.push({ ...wSegs[wSegs.length - 1] });
+  }
+  wInvincible      = Math.max(wInvincible, 90);
+  energyBarDisplay = Math.max(energyBarDisplay, 12);
+  energyMaxSegs    = Math.max(energyMaxSegs, 12);
+  energyBarFlash   = 25;
+  screenFlashT     = 18;
+  for (let i = 0; i < 18; i++) {
+    const a = (i / 18) * Math.PI * 2;
+    const spd = rand(2.5, 6.0);
+    orbParticles.push({ x: ox, y: oy, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, alpha: 1, col: ORB_COLORS[Math.floor(i / 18 * ORB_COLORS.length)], r: rand(3, 6) });
+  }
+  floatingTexts.push({ x: ox, y: oy - 20, vy: -0.6, text: 'FULL RESTORE!', col: '#f5e642', alpha: 1, size: 22, t: 0, rainbow: true });
+  sfx.orbLarge();
+  showToast('FULLY RESTORED!', 2200, '#f5e642');
+  largeOrbTimer = 0;
+}
+
+// ─── SPEED PILL ───────────────────────────────────────────────────────────────
+let speedPill      = null;
+let speedPillTimer = 0;
+const SPEED_PILL_INTERVAL = 500;
+const SPEED_PILL_LIFE     = 520;
+
+function spawnSpeedPill() {
+  if (speedPill) return;
+  speedPill = {
+    x: rand(60, W - 60), y: rand(60, H - 60),
+    t: 0, life: SPEED_PILL_LIFE, despawning: false, despawnT: 0,
+  };
+}
+
+function updateSpeedPill() {
+  if (!speedPill) {
+    speedPillTimer++;
+    if (speedPillTimer >= SPEED_PILL_INTERVAL) { speedPillTimer = 0; spawnSpeedPill(); }
+    return;
+  }
+  const p = speedPill;
+  p.t++;
+
+  if (p.despawning) {
+    p.despawnT++;
+    if (p.despawnT >= 20) { speedPill = null; }
+    return;
+  }
+
+  p.life--;
+  if (p.life <= 0) { p.despawning = true; return; }
+
+  if (wSegs.length > 0 && deathState === null) {
+    const hx = wrapX(wSegs[0].x), hy = wrapY(wSegs[0].y);
+    if (Math.hypot(hx - p.x, hy - p.y) < SEG_RADIUS + 38) {
+      _collectSpeedPill(p.x, p.y);
+      speedPill = null;
+    }
+  }
+}
+
+function _collectSpeedPill(px, py) {
+  wPillBoost  = 2.5;
+  wPillBoostT = 240;
+  floatingTexts.push({ x: px, y: py - 10, vy: -0.8, text: 'SPEED UP!', col: '#00e5ff', alpha: 1, size: 18, t: 0, rainbow: false });
+  sfx.speedPill();
+  showToast('SPEED BOOST!', 1800, '#00e5ff');
+  speedPillTimer = 0;
+}
+
+// ─── ORB PARTICLES & FLOATING TEXT ───────────────────────────────────────────
+function updateOrbParticles() {
+  for (let i = orbParticles.length - 1; i >= 0; i--) {
+    const p = orbParticles[i];
+    p.x += p.vx; p.y += p.vy; p.vx *= 0.94; p.vy *= 0.94;
+    p.alpha -= 0.025;
+    if (p.alpha <= 0) orbParticles.splice(i, 1);
+  }
+}
+function drawOrbParticles() {
+  for (const p of orbParticles) {
+    ctx.save();
+    ctx.globalAlpha = p.alpha;
+    ctx.fillStyle = p.col; ctx.shadowColor = p.col; ctx.shadowBlur = 10;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+function updateFloatingTexts() {
+  for (let i = floatingTexts.length - 1; i >= 0; i--) {
+    const ft = floatingTexts[i];
+    ft.y += ft.vy; ft.t++; ft.alpha -= 0.012;
+    if (ft.alpha <= 0) floatingTexts.splice(i, 1);
+  }
+}
+function drawFloatingTexts() {
+  for (const ft of floatingTexts) {
+    const col = ft.rainbow ? orbCycleColor(ft.t * 0.025) : ft.col;
+    ctx.save();
+    ctx.globalAlpha = ft.alpha;
+    ctx.font = `700 ${ft.size}px "Space Mono",monospace`;
+    ctx.fillStyle = col; ctx.shadowColor = col; ctx.shadowBlur = 12;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(ft.text, ft.x, ft.y);
+    ctx.restore();
+  }
+}
+
+// ─── DRAW ORBS & PILL ────────────────────────────────────────────────────────
+function drawSmallOrb() {
+  if (!smallOrb) return;
+  const o = smallOrb;
+  const scl = o.spawningT > 0 ? (15 - o.spawningT) / 15
+            : o.despawning    ? Math.max(0, 1 - o.despawnT / 20)
+            : 1;
+  const col   = orbCycleColor(o.t / 108);
+  const pulse = (0.88 + 0.24 * Math.sin(o.t * 0.08)) * scl;
+  const r     = 10 * pulse;
+  ctx.save();
+  ctx.globalAlpha = scl;
+  ctx.shadowColor = col; ctx.shadowBlur = 16;
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.arc(o.x, o.y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 4; ctx.globalAlpha = 0.6 * scl;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(o.x - r * 0.2, o.y - r * 0.2, Math.max(0.1, 4 * scl), 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawLargeOrb() {
+  if (!largeOrb) return;
+  const o = largeOrb;
+  const scl = o.spawningT > 0 ? (15 - o.spawningT) / 15
+            : o.despawning    ? Math.max(0, 1 - o.despawnT / 20)
+            : 1;
+  const col   = orbCycleColor(o.t / 108);
+  const pulse = (0.88 + 0.24 * Math.sin(o.t * 0.08)) * scl;
+  const r     = 18 * pulse;
+
+  for (const ring of o.rings) {
+    ctx.save();
+    ctx.globalAlpha = ring.alpha * scl;
+    ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+    ctx.shadowColor = col; ctx.shadowBlur = 8;
+    ctx.beginPath(); ctx.arc(o.x, o.y, ring.r, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.save();
+  ctx.globalAlpha = scl;
+  ctx.shadowColor = col; ctx.shadowBlur = 28;
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.arc(o.x, o.y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 6; ctx.globalAlpha = 0.6 * scl;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(o.x - r * 0.2, o.y - r * 0.2, Math.max(0.1, 7 * scl), 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  if (r > 0.5) {
+    ctx.save();
+    ctx.globalAlpha = scl;
+    ctx.font = '700 7px "Space Mono",monospace';
+    ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    ctx.shadowColor = col; ctx.shadowBlur = 6;
+    ctx.fillText('MAX', o.x, o.y - r - 4);
+    ctx.restore();
+  }
+}
+
+function drawSpeedPill() {
+  if (!speedPill) return;
+  const p   = speedPill;
+  const alp = p.despawning ? Math.max(0, 1 - p.despawnT / 20) : 1;
+  const glowCol = Math.floor(p.t / 30) % 2 === 0 ? '#00e5ff' : '#ff2d78';
+  const pw = 18, ph = 10, rx = 5;
+
+  ctx.save();
+  ctx.globalAlpha = alp;
+  ctx.shadowColor = glowCol; ctx.shadowBlur = 14;
+
+  ctx.fillStyle = '#00e5ff';
+  ctx.beginPath();
+  ctx.roundRect(p.x - pw / 2, p.y - ph / 2, pw / 2, ph, [rx, 0, 0, rx]);
+  ctx.fill();
+
+  ctx.fillStyle = '#ff2d78';
+  ctx.beginPath();
+  ctx.roundRect(p.x, p.y - ph / 2, pw / 2, ph, [0, rx, rx, 0]);
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)'; ctx.lineWidth = 1; ctx.shadowBlur = 0;
+  ctx.beginPath(); ctx.moveTo(p.x, p.y - ph / 2 + 1); ctx.lineTo(p.x, p.y + ph / 2 - 1); ctx.stroke();
+
+  ctx.font = '700 6px "Space Mono",monospace'; ctx.fillStyle = '#ffffff';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.shadowBlur = 0;
+  ctx.fillText('SPD', p.x, p.y - ph / 2 - 3);
+  ctx.restore();
 }
 
 // ─── DEATH SEQUENCE ──────────────────────────────────────────────────────────
@@ -4752,7 +5278,8 @@ let audioCtx = null;
 let soundEnabled = localStorage.getItem('sw_sound') !== 'off';
 
 function getAudioCtx() {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!audioCtx || audioCtx.state === 'closed')
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   if (audioCtx.state === 'suspended') audioCtx.resume();
   return audioCtx;
 }
@@ -4911,6 +5438,7 @@ const sfx = {
     sfxTone({ type: 'sawtooth', freq: 320, freqEnd: 140, duration: 0.18, gain: 0.26 });
   },
   snap() {
+    if (!soundEnabled) return;
     // NES cartridge yank: short noise burst + descending sawtooth zap
     const ac = getAudioCtx(); const t0 = ac.currentTime;
     sfxNoise({ duration: 0.04, gain: 0.28, filterFreq: 4800, filterFreqEnd: 600, attack: 0.001 });
@@ -4919,6 +5447,25 @@ const sfx = {
   poisonExplode() {
     // Sharp crack: white-noise burst 80ms, punchy
     sfxNoise({ duration: 0.08, gain: 0.38, filterFreq: 7000, filterFreqEnd: 180, attack: 0.001 });
+  },
+  orbSmall() {
+    // Warm ascending two-tone chime
+    const ac = getAudioCtx(); const t0 = ac.currentTime;
+    sfxTone({ type: 'sine', freq: 330, freqEnd: 550, duration: 0.14, gain: 0.26, startTime: t0 });
+    sfxTone({ type: 'sine', freq: 550, freqEnd: 880, duration: 0.18, gain: 0.22, startTime: t0 + 0.12 });
+  },
+  orbLarge() {
+    // Triumphant ascending arpeggio
+    const ac = getAudioCtx(); const t0 = ac.currentTime;
+    [[262,0.00],[330,0.10],[392,0.20],[523,0.30],[659,0.42]].forEach(([f,dt]) =>
+      sfxTone({ type: 'sine', freq: f, duration: 0.14, gain: 0.28, startTime: t0 + dt })
+    );
+  },
+  speedPill() {
+    // Double ascending zap
+    const ac = getAudioCtx(); const t0 = ac.currentTime;
+    sfxTone({ type: 'square', freq: 440, freqEnd: 880,  duration: 0.12, gain: 0.24, startTime: t0 });
+    sfxTone({ type: 'square', freq: 880, freqEnd: 1320, duration: 0.10, gain: 0.20, startTime: t0 + 0.10 });
   },
 };
 
@@ -4966,7 +5513,24 @@ function updateSpeedIndicator() {
 }
 
 // ─── MAIN LOOP ───────────────────────────────────────────────────────────────
+let _frameErrEl = null;
+function _showFrameError(err) {
+  if (!_frameErrEl) {
+    _frameErrEl = document.createElement('div');
+    Object.assign(_frameErrEl.style, {
+      position:'fixed', top:'8px', left:'8px', right:'8px',
+      background:'rgba(200,0,0,0.92)', color:'#fff',
+      fontFamily:'monospace', fontSize:'12px', padding:'8px 12px',
+      borderRadius:'4px', zIndex:'9999', whiteSpace:'pre-wrap',
+      pointerEvents:'none',
+    });
+    document.body.appendChild(_frameErrEl);
+  }
+  _frameErrEl.textContent = String(err?.stack || err);
+}
+
 function frame() {
+  try {
   // Background always draws at full canvas — no shake offset (avoids edge gaps)
   drawBackground();
 
@@ -4993,6 +5557,8 @@ function frame() {
     if (deathState === null && currentLevel >= 2) updateCompetitors();
     if (deathState === null && currentLevel === 3) updateConstellations();
     if (deathState === null && currentLevel >= 4) { updateBlackHole(); updateRedWorms(); }
+    updateSmallOrb(); updateLargeOrb(); updateSpeedPill();
+    updateOrbParticles(); updateFloatingTexts();
   }
 
   // Wormhole exit animation runs even while the level banner is pausing the game,
@@ -5018,6 +5584,8 @@ function frame() {
     if (alienShips.length > 0) drawShips();
     if (currentLevel >= 2) drawCompetitors();
     if (currentLevel >= 4) drawRedWorms();
+    drawSmallOrb(); drawLargeOrb(); drawSpeedPill();
+    drawOrbParticles(); drawFloatingTexts();
     drawSnapEffects();  // always on top
   }
 
@@ -5044,8 +5612,23 @@ function frame() {
     ctx.restore();
   }
 
+  // Rainbow screen edge flash (large orb collection)
+  if (screenFlashT > 0) {
+    const falp = (screenFlashT / 18) * 0.4;
+    ctx.save();
+    ctx.globalAlpha = falp;
+    const fg = ctx.createLinearGradient(0, 0, W, H);
+    ORB_COLORS.forEach((c, i) => fg.addColorStop(i / (ORB_COLORS.length - 1), c));
+    ctx.strokeStyle = fg; ctx.lineWidth = 32;
+    ctx.strokeRect(-16, -16, W + 32, H + 32);
+    ctx.restore();
+    screenFlashT--;
+  }
+
   updateSpeedIndicator();
   updateLevelHUD();
+  updateEnergyBar();
+  } catch(err) { _showFrameError(err); }
   requestAnimationFrame(frame);
 }
 
