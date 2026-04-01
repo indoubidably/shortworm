@@ -997,6 +997,9 @@ let flipT             = 0;   // frames elapsed in current phase
 let flipHeadFlash     = 0;   // frames of white head flash remaining
 let flipCompress      = 0;   // visual compression factor 0–0.2
 let flipBrakeStartSpd = 0;   // base speed at moment flip was triggered
+
+// Energy alert state
+let energyCriticalAlerted = false; // tracks if the CRITICAL energy warning has been shown
 const FLIP_BRAKE_F    = 8;
 const FLIP_ACCEL_F    = 12;
 const FLIP_BRAKE_SPD  = 1.8; // speed target at end of brake / start of accel
