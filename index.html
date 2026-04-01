@@ -4557,14 +4557,32 @@ function orbCycleColor(t) {
 let energyMaxSegs         = 12;
 let energyBarDisplay      = 12;   // animated display value (float)
 let energyBarFlash        = 0;    // bright edge flash frames on gain
-let energyCriticalAlerted = false;
 let energyPulseT          = 0;
+// Tier system: 0=full(>=10) 1=medium(6-9) 2=low(3-5) 3=critical(2)
+let energyTier          = 0;
+let energyDesatCur      = 0;      // current desaturation factor 0.0–1.0
+let energyDesatTarget   = 0;
+let energyHeartbeatT    = 0;      // frame counter for heartbeat cadence
+let energyHeartbeat     = false;  // true during brief color-flash window
+let energyMediumAlerted = false;  // once per life
+let energyLowAlerted    = false;  // once per life
+let energySlowAlerted   = false;  // once per game (never resets)
+let energyReminderT     = 180;    // countdown to next recurring reminder
 
 const _energyHudEl = document.getElementById('energy-hud');
 const _energyBarEl = document.getElementById('energy-bar-fill');
 const _dangerVigEl = document.getElementById('danger-vignette');
 const _pillHudEl   = document.getElementById('pill-boost-hud');
 const _pillBarEl   = document.getElementById('pill-boost-bar-fill');
+
+function energyWarn(text, col, size, lifeSecs) {
+  if (!wSegs.length) return;
+  floatingTexts.push({
+    x: wrapX(wSegs[0].x), y: wrapY(wSegs[0].y) - 35,
+    vy: -0.4, text, col, alpha: 1, size, t: 0,
+    rainbow: false, decay: 1 / (lifeSecs * 60),
+  });
+}
 
 function updateEnergyBar() {
   if (!gameStarted) {
@@ -4576,32 +4594,103 @@ function updateEnergyBar() {
   _energyHudEl.classList.add('visible');
   energyPulseT++;
 
+  // ── Tier detection ──────────────────────────────────────────────────────
+  const elen = wSegs.length;
+  const newTier = elen >= 10 ? 0 : elen >= 6 ? 1 : elen >= 3 ? 2 : 3;
+
+  if (newTier > energyTier && deathState === null) {
+    if (newTier === 1 && !energyMediumAlerted) {
+      energyMediumAlerted = true;
+      energyWarn('ENERGY DROPPING — EAT PIXELS!', '#f5e642', 13, 2.5);
+    }
+    if (newTier === 2) {
+      if (!energyLowAlerted) {
+        energyLowAlerted = true;
+        energyWarn('LOW ENERGY — FIND A POWER ORB!', '#ff6b2b', 15, 3);
+      }
+      if (!energySlowAlerted) {
+        energySlowAlerted = true;
+        energyWarn('SLOWING DOWN...', 'rgba(255,107,43,0.65)', 10, 2.5);
+      }
+    }
+    if (newTier === 3) {
+      energyWarn('CRITICAL! FIND ENERGY NOW!', '#ff2200', 16, 2);
+      showToast('CRITICAL — FIND ENERGY!', 2000, '#ff2200');
+    }
+  }
+  energyTier = newTier;
+
+  // ── Smooth desaturation ─────────────────────────────────────────────────
+  const DESAT_TARGETS = [0, 0.25, 0.60, 0.85];
+  energyDesatTarget = DESAT_TARGETS[energyTier];
+  energyDesatCur += (energyDesatTarget - energyDesatCur) * 0.05;
+  if (Math.abs(energyDesatTarget - energyDesatCur) < 0.002) energyDesatCur = energyDesatTarget;
+
+  // ── Heartbeat pulse ─────────────────────────────────────────────────────
+  energyHeartbeatT++;
+  if (energyTier === 3) {
+    energyHeartbeat = (energyHeartbeatT % 18) < 6;
+  } else if (energyTier === 2) {
+    energyHeartbeat = (energyHeartbeatT % 45) < 6;
+  } else {
+    energyHeartbeat = false;
+  }
+
+  // ── Recurring reminders ─────────────────────────────────────────────────
+  if (energyTier >= 2 && deathState === null) {
+    energyReminderT--;
+    if (energyReminderT <= 0) {
+      energyReminderT = 180;
+      const hasReminder = floatingTexts.some(ft => ft.energyReminder);
+      if (!hasReminder && wSegs.length) {
+        const msgs = ['EAT MORE PIXELS!', 'FIND THE POWER ORB!', 'GRAB THAT GLOWING ORB!'];
+        floatingTexts.push({
+          x: wrapX(wSegs[0].x), y: wrapY(wSegs[0].y) - 50,
+          vy: -0.3,
+          text: msgs[Math.floor(Math.random() * msgs.length)],
+          col: '#ff6b2b', alpha: 1, size: 11, t: 0,
+          rainbow: false, decay: 1/60, energyReminder: true,
+        });
+      }
+    }
+  } else {
+    energyReminderT = 180;
+  }
+
+  // ── Energy bar ──────────────────────────────────────────────────────────
   const maxL   = Math.max(energyMaxSegs, 12);
   const ratio  = Math.min(1, Math.max(0, energyBarDisplay / maxL));
   const fillPx = ratio * 180;
 
   let fillCol, glowRgb;
-  if      (ratio > 0.75) { fillCol = '#00e5ff'; glowRgb = '0,229,255'; }
-  else if (ratio > 0.5)  { fillCol = '#f5e642'; glowRgb = '245,230,66'; }
-  else if (ratio > 0.25) { fillCol = '#ff6b2b'; glowRgb = '255,107,43'; }
-  else                   { fillCol = '#ff2200'; glowRgb = '255,34,0'; }
+  if      (energyTier === 0) { fillCol = '#00e5ff'; glowRgb = '0,229,255'; }
+  else if (energyTier === 1) { fillCol = '#f5e642'; glowRgb = '245,230,66'; }
+  else if (energyTier === 2) { fillCol = '#ff6b2b'; glowRgb = '255,107,43'; }
+  else                       { fillCol = '#ff2200'; glowRgb = '255,34,0'; }
 
   let blur = 4;
-  if (ratio <= 0.25) {
-    const pulse = Math.abs(Math.sin(energyPulseT * (wSegs.length <= 4 ? 0.4 : 0.15)));
-    blur = 8 + 10 * pulse;
-  }
+  if      (energyTier === 1) { blur = 4 + 3  * Math.abs(Math.sin(energyPulseT * 0.06)); }
+  else if (energyTier === 2) { blur = 6 + 8  * Math.abs(Math.sin(energyPulseT * 0.13)); }
+  else if (energyTier === 3) { blur = 8 + 14 * Math.abs(Math.sin(energyPulseT * 0.28)); }
 
   const glow = energyBarFlash > 0
     ? `0 0 20px #ffffff, 0 0 8px rgba(${glowRgb},0.9)`
-    : `0 0 ${Math.round(blur)}px rgba(${glowRgb},0.8)`;
+    : `0 0 ${Math.round(blur)}px rgba(${glowRgb},0.85)`;
   if (energyBarFlash > 0) energyBarFlash--;
 
-  _energyBarEl.style.width     = Math.max(0, fillPx) + 'px';
+  _energyBarEl.style.width      = Math.max(0, fillPx) + 'px';
   _energyBarEl.style.background = fillCol;
   _energyBarEl.style.boxShadow  = glow;
 
-  if (ratio <= 0.25 && deathState === null && gameStarted) {
+  // Critical shake: ±2px horizontal every 8 frames
+  if (energyTier === 3) {
+    _energyBarEl.style.transform = `translateX(${(Math.floor(energyPulseT / 8) % 2 === 0) ? 2 : -2}px)`;
+  } else {
+    _energyBarEl.style.transform = '';
+  }
+
+  // Danger vignette for low/critical
+  if (energyTier >= 2 && deathState === null) {
     _dangerVigEl.classList.add('active');
   } else {
     _dangerVigEl.classList.remove('active');
